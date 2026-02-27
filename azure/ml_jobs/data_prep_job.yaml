@@ -1,0 +1,42 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+
+display_name: data-prep-spider-bird
+experiment_name: text2sql-data-prep
+description: "Download Spider/BIRD datasets, serialize schemas, and split by schema."
+
+code: ../../data/prep
+
+command: >-
+  python download_spider_bird.py --output-dir ${{outputs.raw_data}} &&
+  python serialize_schemas.py
+    --input-dir ${{outputs.raw_data}}
+    --output-dir ${{outputs.serialized_schemas}} &&
+  python schema_split.py
+    --input-dir ${{outputs.serialized_schemas}}
+    --output-dir ${{outputs.split_data}}
+    --train-ratio 0.8
+    --val-ratio 0.1
+
+environment:
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest
+  conda_file: ../environments/conda_env.yml
+
+compute: azureml:gpu-cluster-dev
+
+outputs:
+  raw_data:
+    type: uri_folder
+    mode: rw_mount
+  serialized_schemas:
+    type: uri_folder
+    mode: rw_mount
+  split_data:
+    type: uri_folder
+    mode: upload
+
+resources:
+  instance_count: 1
+
+settings:
+  docker_args: "--shm-size=8g"

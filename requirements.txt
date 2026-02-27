@@ -1,0 +1,41 @@
+# Core ML/AI
+torch>=2.2.0
+transformers>=4.40.0
+accelerate>=0.29.0
+peft>=0.10.0
+bitsandbytes>=0.43.0
+trl>=0.8.6
+datasets>=2.18.0
+
+# SQL parsing and execution
+sqlglot>=23.0.0
+sqlparse>=0.5.0
+
+# Azure
+mlflow>=2.12.0
+azure-ai-ml>=1.15.0
+azure-identity>=1.16.0
+
+# Data / compute
+pandas>=2.2.0
+pyarrow>=15.0.0
+numpy>=1.26.0
+tqdm>=4.66.0
+
+# Config and validation
+pydantic>=2.6.0
+pyyaml>=6.0.1
+
+# Demo
+streamlit>=1.33.0
+requests>=2.31.0
+
+# Logging
+loguru>=0.7.0
+
+# Dev / test
+pytest>=8.1.0
+pytest-cov>=5.0.0
+ruff>=0.4.0
+black>=24.3.0
+isort>=5.13.0

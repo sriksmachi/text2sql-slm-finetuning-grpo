@@ -1,0 +1,40 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+
+display_name: text2sql-eval
+experiment_name: text2sql-evaluation
+description: "Evaluate Text-to-SQL model: cross-schema execution accuracy + MLflow logging."
+
+code: ../../src
+
+command: >-
+  python evaluator.py
+    --model-dir ${{inputs.model_checkpoint}}
+    --test-data ${{inputs.test_data}}
+    --output-dir ${{outputs.eval_results}}
+    --mlflow-tracking-uri ${{inputs.mlflow_tracking_uri}}
+    --dialects sqlite postgresql
+
+environment: azureml:text2sql-unsloth-trl@latest
+
+compute: azureml:gpu-cluster-dev
+
+inputs:
+  model_checkpoint:
+    type: uri_folder
+  test_data:
+    type: uri_folder
+  mlflow_tracking_uri:
+    type: string
+    default: "azureml://..."
+
+outputs:
+  eval_results:
+    type: uri_folder
+    mode: upload
+
+resources:
+  instance_count: 1
+
+settings:
+  docker_args: "--shm-size=8g"

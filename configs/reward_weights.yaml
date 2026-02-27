@@ -1,0 +1,15 @@
+# Reward function weights – must sum to 1.0
+#
+# format_reward        : SQL syntax validity (sqlglot parse succeeds)
+# exec_reward          : Query executes without error on target DB
+# schema_fidelity_reward: All referenced tables/columns exist in the schema
+
+format_reward: 0.2
+exec_reward: 0.5
+schema_fidelity_reward: 0.3
+
+# Penalty applied when model output contains no SQL block at all
+no_sql_penalty: -1.0
+
+# Penalty for SQL that parses but references unknown schema items
+unknown_schema_item_penalty: -0.5

@@ -1,0 +1,55 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+
+display_name: grpo-train
+experiment_name: text2sql-grpo-training
+description: "GRPO fine-tuning of a base LLM for Text-to-SQL using Unsloth + TRL."
+
+code: ../../src
+
+command: >-
+  python grpo_trainer.py
+    --config ${{inputs.grpo_config}}
+    --training-args ${{inputs.training_args}}
+    --reward-weights ${{inputs.reward_weights}}
+    --train-data ${{inputs.train_data}}
+    --val-data ${{inputs.val_data}}
+    --output-dir ${{outputs.model_checkpoint}}
+    --mlflow-tracking-uri ${{inputs.mlflow_tracking_uri}}
+
+environment: azureml:text2sql-unsloth-trl@latest
+
+compute: azureml:gpu-cluster-dev
+
+inputs:
+  grpo_config:
+    type: uri_file
+    path: ../../configs/grpo_config.yaml
+  training_args:
+    type: uri_file
+    path: ../../configs/training_args.yaml
+  reward_weights:
+    type: uri_file
+    path: ../../configs/reward_weights.yaml
+  train_data:
+    type: uri_folder
+  val_data:
+    type: uri_folder
+  mlflow_tracking_uri:
+    type: string
+    default: "azureml://..."
+
+outputs:
+  model_checkpoint:
+    type: uri_folder
+    mode: upload
+
+resources:
+  instance_count: 1
+
+distribution:
+  type: pytorch
+  process_count_per_instance: 1
+
+settings:
+  docker_args: "--shm-size=16g --gpus all"

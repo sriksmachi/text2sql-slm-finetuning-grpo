@@ -1,0 +1,47 @@
+[
+  {
+    "db_id": "tpch",
+    "question": "What is the total revenue for orders shipped in January 1995?",
+    "sql": "SELECT SUM(l_extendedprice * (1 - l_discount)) AS revenue FROM lineitem WHERE l_shipdate >= '1995-01-01' AND l_shipdate < '1995-02-01'"
+  },
+  {
+    "db_id": "tpch",
+    "question": "List the top 5 customers by total order value.",
+    "sql": "SELECT c.c_name, SUM(o.o_totalprice) AS total FROM customer c JOIN orders o ON c.c_custkey = o.o_custkey GROUP BY c.c_custkey, c.c_name ORDER BY total DESC LIMIT 5"
+  },
+  {
+    "db_id": "tpch",
+    "question": "Find suppliers who supply more than 1000 distinct parts.",
+    "sql": "SELECT s.s_name, COUNT(DISTINCT ps.ps_partkey) AS part_count FROM supplier s JOIN partsupp ps ON s.s_suppkey = ps.ps_suppkey GROUP BY s.s_suppkey, s.s_name HAVING COUNT(DISTINCT ps.ps_partkey) > 1000"
+  },
+  {
+    "db_id": "enterprise_hr",
+    "question": "Which employees earn more than their manager?",
+    "sql": "SELECT e.employee_id, e.first_name, e.last_name, e.salary FROM employee e JOIN employee m ON e.manager_id = m.employee_id WHERE e.salary > m.salary"
+  },
+  {
+    "db_id": "enterprise_hr",
+    "question": "Show the average salary per department, sorted descending.",
+    "sql": "SELECT d.department_name, AVG(e.salary) AS avg_salary FROM department d JOIN employee e ON d.department_id = e.department_id GROUP BY d.department_id, d.department_name ORDER BY avg_salary DESC"
+  },
+  {
+    "db_id": "enterprise_sales",
+    "question": "What are the top 10 best-selling products by total quantity sold?",
+    "sql": "SELECT p.product_name, SUM(od.quantity) AS total_qty FROM product p JOIN order_detail od ON p.product_id = od.product_id GROUP BY p.product_id, p.product_name ORDER BY total_qty DESC LIMIT 10"
+  },
+  {
+    "db_id": "enterprise_sales",
+    "question": "Find customers who placed orders in every month of 1997.",
+    "sql": "SELECT c.customer_id, c.company_name FROM customer c JOIN \"order\" o ON c.customer_id = o.customer_id WHERE strftime('%Y', o.order_date) = '1997' GROUP BY c.customer_id, c.company_name HAVING COUNT(DISTINCT strftime('%m', o.order_date)) = 12"
+  },
+  {
+    "db_id": "enterprise_inventory",
+    "question": "Which items are below their reorder point in any warehouse?",
+    "sql": "SELECT ii.item_name, w.warehouse_name, s.quantity_on_hand, ii.reorder_point FROM inventory_item ii JOIN stock s ON ii.item_id = s.item_id JOIN warehouse w ON s.warehouse_id = w.warehouse_id WHERE s.quantity_on_hand < ii.reorder_point"
+  },
+  {
+    "db_id": "enterprise_inventory",
+    "question": "What is the total inventory value per warehouse?",
+    "sql": "SELECT w.warehouse_name, SUM(s.quantity_on_hand * ii.unit_cost) AS inventory_value FROM warehouse w JOIN stock s ON w.warehouse_id = s.warehouse_id JOIN inventory_item ii ON s.item_id = ii.item_id GROUP BY w.warehouse_id, w.warehouse_name ORDER BY inventory_value DESC"
+  }
+]

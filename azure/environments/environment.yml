@@ -1,0 +1,7 @@
+$schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
+name: text2sql-unsloth-trl
+version: "1"
+description: "Custom environment with Unsloth + TRL for GRPO Text-to-SQL training."
+build:
+  path: ../../docker
+  dockerfile_path: Dockerfile
