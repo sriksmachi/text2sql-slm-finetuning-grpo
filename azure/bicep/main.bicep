@@ -12,7 +12,7 @@ param baseName string = 'text2sql'
 param environment string = 'dev'
 
 @description('SKU for the GPU compute cluster')
-param computeVmSize string = 'Standard_NC24ads_A100_v4'
+param computeVmSize string = 'Standard_NC16as_T4_v3'
 
 @description('Maximum number of compute nodes')
 param computeMaxNodes int = 4

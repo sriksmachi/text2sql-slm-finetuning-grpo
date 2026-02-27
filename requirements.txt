@@ -6,6 +6,7 @@ peft>=0.10.0
 bitsandbytes>=0.43.0
 trl>=0.8.6
 datasets>=2.18.0
+unsloth
 
 # SQL parsing and execution
 sqlglot>=23.0.0
@@ -15,6 +16,7 @@ sqlparse>=0.5.0
 mlflow>=2.12.0
 azure-ai-ml>=1.15.0
 azure-identity>=1.16.0
+openai>=1.40.0
 
 # Data / compute
 pandas>=2.2.0
