@@ -14,6 +14,8 @@ Usage
 		--azure-openai-endpoint https://<resource>.openai.azure.com/ \
 		--azure-openai-deployment gpt-4.1
 
+
+
 Authentication
 --------------
 Uses Microsoft Entra ID (``DefaultAzureCredential``). Ensure your identity has
@@ -40,10 +42,10 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from evaluator import cross_schema_exec_acc
 from utils import build_prompt, extract_sql_from_text
 
-
 def _quote_ident(name: str) -> str:
-	return f'"{name.replace("\"", "\"\"")}"'
-
+    """Quote an SQL identifier (table or column name) for SQLite."""
+    escaped = name.replace('"', '""')
+    return escaped if escaped.isidentifier() else f'"{escaped}"'
 
 def _create_schema_only_sqlite(schema: dict[str, list[str]], db_path: Path) -> None:
 	conn = sqlite3.connect(str(db_path))

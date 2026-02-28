@@ -70,10 +70,7 @@ cd text2sql-grpo-azure-ml
 
 # Deploy Azure ML workspace + compute + endpoints
 az group create --name rg-text2sql-dev --location eastus
-az deployment group create \
-  --resource-group rg-text2sql-dev \
-  --template-file azure/bicep/main.bicep \
-  --parameters baseName=text2sql environment=dev ownerObjectId=$(az ad signed-in-user show --query id -o tsv)
+az deployment group create --resource-group rg-text2sql-dev --template-file azure/bicep/main.bicep --parameters baseName=text2sql environment=dev ownerObjectId=$(az ad signed-in-user show --query id -o tsv)
 ```
 
 ### Run the full pipeline
@@ -90,7 +87,7 @@ az ml job create \
 
 ```bash
 # 1. Data preparation
-az ml job create --file azure/ml_jobs/data_prep_job.yaml ...
+az ml job create --file azure/ml_jobs/data_prep_job.yaml --resource-group 
 
 # 2. GRPO training
 az ml job create --file azure/ml_jobs/grpo_train_job.yaml ...

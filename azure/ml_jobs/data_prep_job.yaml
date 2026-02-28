@@ -38,5 +38,3 @@ outputs:
 resources:
   instance_count: 1
 
-settings:
-  docker_args: "--shm-size=8g"
