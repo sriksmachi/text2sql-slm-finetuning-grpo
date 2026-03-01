@@ -8,7 +8,7 @@
 //   az deployment sub create \
 //     --location eastus \
 //     --template-file main.bicep \
-//     --parameters envName=text2sql-grpo userObjectId=<oid> myIpAddress=<ip>
+//     --parameters envName=text2sql-grpo
 // ============================================================
 targetScope = 'subscription'
 
@@ -20,12 +20,6 @@ param location string = 'eastus'
 
 @description('VM size for the GPU compute instance')
 param computeVmSize string = 'Standard_NC16as_T4_v3'
-
-@description('Object ID of the user who needs Contributor + Storage access')
-param userObjectId string
-
-@description('Your current public IP address – whitelisted on the storage firewall')
-param myIpAddress string
 
 @description('Set to false to skip role assignment creation on re-runs when assignments already exist')
 param createRoleAssignments bool = true
@@ -48,8 +42,6 @@ module resources 'resources.bicep' = {
     location: location
     envName: envName
     computeVmSize: computeVmSize
-    userObjectId: userObjectId
-    myIpAddress: myIpAddress
     createRoleAssignments: createRoleAssignments
   }
 }
