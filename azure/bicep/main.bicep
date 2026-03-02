@@ -21,9 +21,6 @@ param location string = 'eastus'
 @description('VM size for the GPU compute instance')
 param computeVmSize string = 'Standard_NC16as_T4_v3'
 
-@description('Set to false to skip role assignment creation on re-runs when assignments already exist')
-param createRoleAssignments bool = true
-
 // ── Resource Group ─────────────────────────────────────────
 resource rg 'Microsoft.Resources/resourceGroups@2023-07-01' = {
   name: '${envName}-rg'
@@ -42,7 +39,6 @@ module resources 'resources.bicep' = {
     location: location
     envName: envName
     computeVmSize: computeVmSize
-    createRoleAssignments: createRoleAssignments
   }
 }
 
