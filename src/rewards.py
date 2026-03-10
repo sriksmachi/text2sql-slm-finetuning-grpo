@@ -70,10 +70,20 @@ def extract_sql(text: str) -> str | None:
             sql = m.group(1).strip()
         else:
             return None
-    # Normalise backslash-escaped quotes (\') → SQL-standard doubled quote ('')
+    # 1) Normalize backslash-escaped quotes (\') -> SQL-standard doubled quote ('')
     sql = sql.replace("\\'", "''")
-    # Normalise bare apostrophes inside words (O'Gallagher → O''Gallagher)
-    sql = re.sub(r"(?<=[a-zA-Z])'(?=[a-zA-Z])", "''", sql)
+
+    # 2) Normalize in-word apostrophes (O'Gallagher -> O''Gallagher, Women's -> Women''s)
+    sql = re.sub(r"(?<=[A-Za-z])'(?=[A-Za-z])", "''", sql)
+
+    # 3) Normalize spaced apostrophes in names (O' Gallagher -> O'' Gallagher),
+    #    but do NOT touch valid quote closures before SQL keywords/operators.
+    sql = re.sub(
+    r"'([^'\n\r]*)''(?=\s*(?:AND|OR|NOT|IN|LIKE|IS|BETWEEN|FROM|WHERE|JOIN|ON|GROUP|ORDER|HAVING|LIMIT|UNION|$|;|,|\)))",
+    r"'\1'",
+    sql,
+    flags=re.IGNORECASE,
+)
     return sql
 
 
