@@ -30,8 +30,8 @@ Database path resolution
 ("spider" | "bird") and a ``base_path`` for locating the actual
 SQLite files:
 
-    spider  →  <base_path>/rawdata/spider/spider_data/database/<db_id>/<db_id>.sqlite
-    bird    →  <base_path>/rawdata/bird/dev_databases/<db_id>/<db_id>.sqlite
+    spider  →  <base_path>/spider/spider_data/database/<db_id>/<db_id>.sqlite
+    bird    →  <base_path>/bird/dev_20240627/dev_databases/<db_id>/<db_id>.sqlite
 """
 
 from __future__ import annotations
@@ -138,14 +138,14 @@ def _exec_on_sqlite(
     sql: str,
     db_path: str | None = None,
     source: str | None = None,
-    base_path: str = os.environ.get("TEXT2SQL_RAWDATA_DIR", "/kaggle/working/"),
+    base_path: str | None = None,
 ) -> tuple[bool, str | None]:
     """Execute *sql* against the correct SQLite database and return the result.
 
     Path resolution uses ``source`` to locate the ``.sqlite`` file:
 
-    * ``source="spider"`` → ``<base_path>/rawdata/spider/spider_data/database/<db_path>/<db_path>.sqlite``
-    * ``source="bird"``   → ``<base_path>/rawdata/bird/dev_databases/<db_path>/<db_path>.sqlite``
+    * ``source="spider"`` → ``<base_path>/spider/spider_data/database/<db_path>/<db_path>.sqlite``
+    * ``source="bird"``   → ``<base_path>/bird/dev_20240627/dev_databases/<db_path>/<db_path>.sqlite``
 
     Parameters
     ----------
@@ -156,23 +156,28 @@ def _exec_on_sqlite(
     source:
         Dataset source – ``"spider"`` or ``"bird"``.
     base_path:
-        Root path under which the ``rawdata/`` directory lives.
-        Defaults to ``/kaggle/working/`` for Kaggle notebooks.
+        Root path of the ``data/`` directory (set via the ``RAWDATA_DIR`` env var).
+        For the local repo this is ``<repo_root>/data``.
+        If ``None``, falls back to the ``RAWDATA_DIR`` environment variable.
 
     Returns
     -------
     ``(True, None)`` on success; ``(False, error_message)`` on failure.
     """
+    if base_path is None:
+        base_path = os.environ.get("RAWDATA_DIR", "")
+
     if source == "spider" and db_path:
-        full_path = f"{base_path}rawdata/spider/spider_data/database/{db_path}/{db_path}.sqlite"
+        full_path = f"{base_path}/spider/spider_data/database/{db_path}/{db_path}.sqlite"
     elif source == "bird" and db_path:
-        full_path = f"{base_path}rawdata/bird/dev_databases/{db_path}/{db_path}.sqlite"
+        full_path = f"{base_path}/bird/dev_20240627/dev_databases/{db_path}/{db_path}.sqlite"
     else:
-        logger.error(
+        logger.warning(
             f"[exec] Cannot resolve DB path for db_path={db_path!r}, source={source!r}"
         )
         return False, "DB path could not be resolved"
 
+    logger.debug(f"[exec] Resolved full_path={full_path!r}")
     try:
         conn = sqlite3.connect(full_path)
         conn.execute(sql)

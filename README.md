@@ -43,14 +43,20 @@ flowchart LR
 
 ## 📊 Results
 
-Rewards are evaluated as the average combined score (`format × 0.2 + exec × 0.5 + schema_fidelity × 0.3`) across held-out splits using schemas unseen during training (schema-level split strategy). The model is `unsloth/Qwen2.5-3B-Instruct` fine-tuned with 4-bit QLoRA + GRPO for 2 epochs on a 400-sample subset.
+Rewards are evaluated as the average combined score (`format × 0.2 + exec × 0.5 + schema_fidelity × 0.3`) across held-out splits using schemas unseen during training (schema-level split strategy). The SLM is `unsloth/Qwen2.5-3B-Instruct` fine-tuned with 4-bit QLoRA + GRPO for 2 epochs on a 400-sample subset. **GPT-5.1** (Azure OpenAI) is evaluated on the same test set as a strong upper-bound reference.
 
-| Dataset | Baseline (pre-GRPO) | After GRPO | Δ (absolute) | Δ (relative) |
+| Dataset | SLM · pre-GRPO ¹ | SLM · post-GRPO ¹ | Δ ablation (abs / rel) | GPT-5.1 ² |
 |---|---:|---:|---:|---:|
-| **Spider** | 0.8365 | **0.8907** | +0.0542 | **+6.48%** |
-| **BIRD** | 0.7133 | **0.7574** | +0.0441 | **+6.18%** |
+| **Spider** | 0.8365 | **0.8907** | +0.0542 / **+6.48%** | 0.9865 |
+| **BIRD** | 0.7133 | **0.7574** | +0.0441 / **+6.18%** | 0.9770 |
+| **Overall** | — | — | — | **0.9801** |
 
-Both datasets improved by ~6%, showing balanced generalisation gains across a clean benchmark (Spider) and a harder, noisier one (BIRD) — with no cross-dataset trade-off. The `exec_reward` component provides the dominant training signal; a query either executes or it doesn't.
+> ¹ GRPO ablation: 400-sample subset, 2 epochs, schema-level split — not trained on full corpus.  
+> ² GPT-5.1 evaluated on the same held-out test set; no fine-tuning.
+
+Both SLM datasets improved by ~6%, showing balanced generalisation gains across a clean benchmark (Spider) and a harder, noisier one (BIRD) — with no cross-dataset trade-off. The `exec_reward` component provides the dominant training signal; a query either executes or it doesn't.
+
+The GRPO-trained 3B SLM reaches **90.3% of GPT-5.1's reward on Spider** and **77.5% on BIRD**, closing a meaningful fraction of the gap to a frontier model at a fraction of the inference cost.
 
 ### Training Configuration
 
@@ -71,11 +77,14 @@ Both datasets improved by ~6%, showing balanced generalisation gains across a cl
 
 ### Analysis
 
-**Spider — strong gain (+6.48%)**  
-Spider improved from 0.8365 to 0.8907, indicating that GRPO successfully reinforced executable query structures, better join paths, and schema-consistent column usage. The magnitude of this gain is meaningful for a short RL run and reflects genuine policy improvement rather than random variance.
+**Spider — strong gain (+6.48%, reaching 90.3% of GPT-5.1)**  
+Spider improved from 0.8365 to 0.8907 against a GPT-5.1 ceiling of 0.9865, indicating that GRPO successfully reinforced executable query structures, better join paths, and schema-consistent column usage. The magnitude of this gain is meaningful for a short RL run and reflects genuine policy improvement rather than random variance.
 
-**BIRD — meaningful improvement on a harder benchmark (+6.18%)**  
-BIRD increased from 0.7133 to 0.7574, which is notable given its higher query complexity, noisier schema semantics, and greater compositional burden. This suggests the model is learning robust behaviour beyond easier Spider-style patterns.
+**BIRD — meaningful improvement on a harder benchmark (+6.18%, reaching 77.5% of GPT-5.1)**  
+BIRD increased from 0.7133 to 0.7574 against a GPT-5.1 ceiling of 0.9770. The larger remaining gap to GPT-5.1 on BIRD (vs. Spider) reflects the benchmark's higher query complexity, noisier schema semantics, and greater compositional burden — areas where the 3B model's capacity is a limiting factor.
+
+**GPT-5.1 as upper-bound reference**  
+GPT-5.1 scores 0.9801 overall (0.9865 Spider / 0.9770 BIRD) on the same reward formula, providing a well-calibrated ceiling. The GRPO-trained 3B SLM recovers ~84% of GPT-5.1's overall reward with orders-of-magnitude lower inference cost, validating the RL fine-tuning approach for cost-sensitive deployments.
 
 **Reward signal validation**  
 The aligned gains across both benchmarks validate the combined reward (`format + execution + schema fidelity`) as an effective supervision proxy for text-to-SQL RL fine-tuning. The execution component provides a hard grounding signal that resists superficial improvements.
@@ -84,11 +93,11 @@ The aligned gains across both benchmarks validate the combined reward (`format +
 
 - Training used a **sampled subset** of the full combined corpus (400 examples, schema-level split), not the complete Spider + BIRD training sets
 - Only **2 epochs** were run; the learning curve had not yet plateaued at checkpoint
-- The 3B model size limits its ability to handle the most complex BIRD queries requiring multi-step reasoning
+- The 3B model size limits its ability to handle the most complex BIRD queries requiring multi-step reasoning; the larger gap vs. GPT-5.1 on BIRD reflects this
 - `extract_sql` and SQLGlot show occasional parsing/token errors; a more robust SQL extraction approach may improve the reward signal
 
 > Results measured on held-out schemas not seen during training. Full evaluation logs available in MLflow.  
-> **Scaling note:** Training for 5–10 epochs on the full Spider + BIRD corpus and upgrading to the 7B variant (`Qwen2.5-Coder-7B-Instruct`) is projected to push Spider beyond 0.93 and further close the BIRD gap.
+> **Scaling note:** Training for 5–10 epochs on the full Spider + BIRD corpus and upgrading to the 7B variant (`Qwen2.5-Coder-7B-Instruct`) is projected to push Spider beyond 0.93 and close the remaining gap with GPT-5.1 on BIRD.
 
 ---
 
