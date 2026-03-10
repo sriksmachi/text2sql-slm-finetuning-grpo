@@ -1,0 +1,130 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+
+type: pipeline
+display_name: text2sql-grpo-pipeline
+description: >
+  End-to-end text-to-SQL GRPO fine-tuning pipeline.
+  Steps: (1) data preparation  →  (2) GRPO training  →  (3) evaluation.
+experiment_name: text2sql-grpo
+
+# ---------------------------------------------------------------------------
+# Pipeline-level inputs – override any of these on the CLI with --set
+# ---------------------------------------------------------------------------
+inputs:
+  # Data preparation
+  sample_size: 400
+  train_ratio: 0.7
+  val_ratio: 0.15
+  seed: 42
+
+  # Training hyperparameters (passed through to configs at runtime)
+  mlflow_tracking_uri: ""
+
+  # Evaluation
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 512
+
+# ---------------------------------------------------------------------------
+# Pipeline-level outputs (surface the artefacts at the pipeline level)
+# ---------------------------------------------------------------------------
+outputs:
+  eval_results:
+    type: uri_folder
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+jobs:
+  # ── Step 1 : Data preparation ────────────────────────────────────────────
+  data_prep:
+    type: command
+    display_name: data-preparation
+    code: ../../
+    environment: azureml:text2sql-grpo-env@latest
+    compute: azureml:cpu-cluster
+    command: >-
+      python src/data_preparation.py
+      --rawdata-dir ${{outputs.rawdata_dir}}
+      --serialized-dir ${{outputs.serialized_schemas}}
+      --splits-dir ${{outputs.csv_splits}}
+      --hf-splits-dir ${{outputs.hf_splits}}
+      --sample-size ${{inputs.sample_size}}
+      --train-ratio ${{inputs.train_ratio}}
+      --val-ratio ${{inputs.val_ratio}}
+      --seed ${{inputs.seed}}
+    inputs:
+      sample_size: ${{parent.inputs.sample_size}}
+      train_ratio: ${{parent.inputs.train_ratio}}
+      val_ratio: ${{parent.inputs.val_ratio}}
+      seed: ${{parent.inputs.seed}}
+    outputs:
+      rawdata_dir:
+        type: uri_folder
+        mode: rw_mount
+      serialized_schemas:
+        type: uri_folder
+        mode: rw_mount
+      hf_splits:
+        type: uri_folder
+        mode: rw_mount
+      csv_splits:
+        type: uri_folder
+        mode: rw_mount
+
+  # ── Step 2 : GRPO training ───────────────────────────────────────────────
+  grpo_train:
+    type: command
+    display_name: grpo-training
+    code: ../../
+    environment: azureml:text2sql-grpo-env@latest
+    compute: azureml:gpu-cluster
+    environment_variables:
+      TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+    command: >-
+      python src/grpo_trainer.py
+      --config configs/grpo_config.yaml
+      --training-args configs/training_args.yaml
+      --reward-weights configs/reward_weights.yaml
+      --train-data ${{inputs.hf_splits}}/train
+      --val-data ${{inputs.hf_splits}}/val
+      --output-dir ${{outputs.model_dir}}
+      $[[--mlflow-tracking-uri ${{inputs.mlflow_tracking_uri}}]]
+    inputs:
+      hf_splits: ${{parent.jobs.data_prep.outputs.hf_splits}}
+      rawdata_dir: ${{parent.jobs.data_prep.outputs.rawdata_dir}}
+      mlflow_tracking_uri: ${{parent.inputs.mlflow_tracking_uri}}
+    outputs:
+      model_dir:
+        type: uri_folder
+        mode: rw_mount
+
+  # ── Step 3 : Evaluation ──────────────────────────────────────────────────
+  eval:
+    type: command
+    display_name: evaluation
+    code: ../../
+    environment: azureml:text2sql-grpo-env@latest
+    compute: azureml:gpu-cluster
+    environment_variables:
+      TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+    command: >-
+      python src/evaluator.py
+      --model-dir ${{inputs.model_dir}}
+      --lora-path ${{inputs.model_dir}}/grpo_saved_lora
+      --test-data ${{inputs.csv_splits}}/test.csv
+      --output-dir ${{outputs.eval_results}}
+      --temperature ${{inputs.temperature}}
+      --top-p ${{inputs.top_p}}
+      --max-tokens ${{inputs.max_tokens}}
+      $[[--mlflow-tracking-uri ${{inputs.mlflow_tracking_uri}}]]
+    inputs:
+      model_dir: ${{parent.jobs.grpo_train.outputs.model_dir}}
+      csv_splits: ${{parent.jobs.data_prep.outputs.csv_splits}}
+      rawdata_dir: ${{parent.jobs.data_prep.outputs.rawdata_dir}}
+      mlflow_tracking_uri: ${{parent.inputs.mlflow_tracking_uri}}
+      temperature: ${{parent.inputs.temperature}}
+      top_p: ${{parent.inputs.top_p}}
+      max_tokens: ${{parent.inputs.max_tokens}}
+    outputs:
+      eval_results: ${{parent.outputs.eval_results}}

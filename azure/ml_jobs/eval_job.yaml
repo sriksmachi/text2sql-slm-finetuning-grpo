@@ -1,0 +1,64 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+type: command
+display_name: text2sql-evaluation
+description: Evaluate the GRPO fine-tuned model on the held-out test split and log metrics to MLflow.
+experiment_name: text2sql-grpo
+
+code: ../../
+
+environment: azureml:text2sql-grpo-env@latest
+
+compute: azureml:gpu-cluster  # Standard_NC24ads_A100_v4 – vLLM inference requires GPU
+
+# exec_reward inside the evaluator needs access to the SQLite databases.
+environment_variables:
+  TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+
+command: >-
+  python src/evaluator.py
+  --model-dir ${{inputs.model_dir}}
+  --lora-path ${{inputs.model_dir}}/grpo_saved_lora
+  --test-data ${{inputs.csv_splits}}/test.csv
+  --output-dir ${{outputs.eval_results}}
+  --temperature ${{inputs.temperature}}
+  --top-p ${{inputs.top_p}}
+  --max-tokens ${{inputs.max_tokens}}
+  $[[--mlflow-tracking-uri ${{inputs.mlflow_tracking_uri}}]]
+
+inputs:
+  model_dir:
+    type: uri_folder
+    mode: ro_mount
+    description: Fine-tuned model directory produced by the training job.
+  csv_splits:
+    type: uri_folder
+    mode: ro_mount
+    description: CSV splits directory; evaluator reads test.csv from this folder.
+  rawdata_dir:
+    type: uri_folder
+    mode: ro_mount
+    description: Raw Spider + BIRD SQLite databases – mounted and exposed as TEXT2SQL_RAWDATA_DIR.
+  mlflow_tracking_uri:
+    type: string
+    default: ""
+    optional: true
+    description: "MLflow tracking URI (leave blank to use the workspace-default tracking)."
+  temperature:
+    type: number
+    default: 0.0
+    description: Sampling temperature for vLLM inference (0 = greedy).
+  top_p:
+    type: number
+    default: 1.0
+    description: Nucleus sampling probability.
+  max_tokens:
+    type: integer
+    default: 512
+    description: Maximum number of output tokens per query.
+
+outputs:
+  eval_results:
+    type: uri_folder
+    mode: rw_mount
+    description: JSON results file and per-example predictions logged as artefacts.

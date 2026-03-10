@@ -1,0 +1,48 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+type: command
+display_name: text2sql-grpo-training
+description: Fine-tune Qwen2.5-Coder-7B-Instruct with GRPO using Unsloth + TRL on the Spider/BIRD training split.
+experiment_name: text2sql-grpo
+
+code: ../../
+
+environment: azureml:text2sql-grpo-env@latest
+
+compute: azureml:gpu-cluster  # Standard_NC24ads_A100_v4 (1 × A100 40 GB)
+
+# The rawdata_dir is bind-mounted and its path exposed via TEXT2SQL_RAWDATA_DIR
+# so that exec_reward can locate the SQLite databases at runtime.
+environment_variables:
+  TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+
+command: >-
+  python src/grpo_trainer.py
+  --config configs/grpo_config.yaml
+  --training-args configs/training_args.yaml
+  --reward-weights configs/reward_weights.yaml
+  --train-data ${{inputs.hf_splits}}/train
+  --val-data ${{inputs.hf_splits}}/val
+  --output-dir ${{outputs.model_dir}}
+  $[[--mlflow-tracking-uri ${{inputs.mlflow_tracking_uri}}]]
+
+inputs:
+  hf_splits:
+    type: uri_folder
+    mode: ro_mount
+    description: HuggingFace Dataset splits produced by the data-prep job.
+  rawdata_dir:
+    type: uri_folder
+    mode: ro_mount
+    description: Raw Spider + BIRD SQLite databases – mounted and exposed as TEXT2SQL_RAWDATA_DIR.
+  mlflow_tracking_uri:
+    type: string
+    default: ""
+    optional: true
+    description: "MLflow tracking URI (leave blank to use the workspace-default tracking)."
+
+outputs:
+  model_dir:
+    type: uri_folder
+    mode: rw_mount
+    description: Saved model weights + LoRA adapter (grpo_saved_lora sub-directory).

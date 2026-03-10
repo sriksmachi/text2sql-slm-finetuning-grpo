@@ -1,0 +1,59 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+type: command
+display_name: text2sql-data-preparation
+description: Download Spider/BIRD datasets, serialize schemas, and produce train/val/test splits in both HuggingFace and CSV formats.
+experiment_name: text2sql-grpo
+
+code: ../../  # repo root – entire workspace is uploaded; scripts live in src/
+
+environment: azureml:text2sql-grpo-env@latest
+
+compute: azureml:cpu-cluster  # data download is CPU-only
+
+command: >-
+  python src/data_preparation.py
+  --rawdata-dir ${{outputs.rawdata_dir}}
+  --serialized-dir ${{outputs.serialized_schemas}}
+  --splits-dir ${{outputs.csv_splits}}
+  --hf-splits-dir ${{outputs.hf_splits}}
+  --sample-size ${{inputs.sample_size}}
+  --train-ratio ${{inputs.train_ratio}}
+  --val-ratio ${{inputs.val_ratio}}
+  --seed ${{inputs.seed}}
+
+inputs:
+  sample_size:
+    type: integer
+    default: 400
+    description: Maximum number of Q/SQL pairs to include (0 = all).
+  train_ratio:
+    type: number
+    default: 0.7
+    description: Fraction of unique schemas in the training split.
+  val_ratio:
+    type: number
+    default: 0.15
+    description: Fraction of unique schemas in the validation split.
+  seed:
+    type: integer
+    default: 42
+    description: Random seed for reproducible schema-level splits.
+
+outputs:
+  rawdata_dir:
+    type: uri_folder
+    mode: rw_mount
+    description: Raw Spider + BIRD SQLite databases (needed by exec_reward at training time).
+  serialized_schemas:
+    type: uri_folder
+    mode: rw_mount
+    description: JSON schema lookup written by serialize_schemas.py.
+  hf_splits:
+    type: uri_folder
+    mode: rw_mount
+    description: HuggingFace Dataset splits (train / val / test) consumed by grpo_trainer.py.
+  csv_splits:
+    type: uri_folder
+    mode: rw_mount
+    description: CSV splits (train.csv / val.csv / test.csv) consumed by evaluator.py.

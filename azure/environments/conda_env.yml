@@ -1,0 +1,58 @@
+# conda_env.yml – Conda environment for Text-to-SQL GRPO training on Azure ML.
+#
+# Base Docker image:
+#   mcr.microsoft.com/azureml/openmpi4.1.0-cuda12.1-cudnn8-ubuntu22.04
+# (specified in environment.yml)
+#
+# GPU target: NVIDIA A100 (40 GB) or V100 (16 GB)
+# CUDA:       12.1   Torch: 2.4.x
+
+name: text2sql-grpo
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    # ── PyTorch (CUDA 12.1 wheel) ──────────────────────────────────────────
+    - torch==2.4.0
+    - torchvision==0.19.0
+    - torchaudio==2.4.0
+    - --extra-index-url https://download.pytorch.org/whl/cu121
+
+    # ── Unsloth + vLLM (must match torch / CUDA versions above) ───────────
+    - "unsloth[cu121-torch240]"
+    - vllm==0.9.2
+    - triton==3.0.0
+    - xformers
+
+    # ── HuggingFace stack ──────────────────────────────────────────────────
+    - transformers==4.56.2
+    - accelerate>=0.29.0
+    - peft>=0.10.0
+    - bitsandbytes>=0.43.0
+    - "trl==0.22.2"
+    - "datasets==4.3.0"
+    - "huggingface_hub>=0.34.0"
+
+    # ── SQL tooling ────────────────────────────────────────────────────────
+    - "sqlglot>=23.0.0"
+    - "sqlparse>=0.5.0"
+
+    # ── Azure / MLflow ─────────────────────────────────────────────────────
+    - "mlflow>=2.12.0"
+    - "azure-ai-ml>=1.15.0"
+    - "azure-identity>=1.16.0"
+    - "openai>=1.40.0"
+
+    # ── Data / compute ─────────────────────────────────────────────────────
+    - "pandas>=2.2.0"
+    - "pyarrow>=15.0.0"
+    - "numpy>=1.26.0"
+    - "tqdm>=4.66.0"
+    - "requests>=2.31.0"
+
+    # ── Config / logging ───────────────────────────────────────────────────
+    - "pyyaml>=6.0.1"
+    - "loguru>=0.7.0"
+    - "pydantic>=2.6.0"
