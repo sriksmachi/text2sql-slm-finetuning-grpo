@@ -83,18 +83,39 @@ az ml job create \
   --stream
 ```
 
+### Register the Azure ML environment
+
+```bash
+# First time only – builds the conda env on top of the CUDA base image
+az ml environment create \
+  --file azure/environments/environment.yml \
+  --resource-group rg-text2sql-dev \
+  --workspace-name aml-text2sql-dev
+```
+
 ### Run individual jobs
 
 ```bash
-# 1. Data preparation
-az ml job create --file azure/ml_jobs/data_prep_job.yaml --resource-group 
+RG=rg-text2sql-dev
+WS=aml-text2sql-dev
 
-# 2. GRPO training
-az ml job create --file azure/ml_jobs/grpo_train_job.yaml ...
+# 1. Data preparation (CPU cluster)
+az ml job create \
+  --file azure/ml_jobs/data_prep_job.yaml \
+  --resource-group $RG --workspace-name $WS --stream
 
-# 3. Evaluation
-az ml job create --file azure/ml_jobs/eval_job.yaml ...
+# 2. GRPO training (GPU cluster – Standard_NC24ads_A100_v4)
+az ml job create \
+  --file azure/ml_jobs/grpo_train_job.yaml \
+  --resource-group $RG --workspace-name $WS --stream
+
+# 3. Evaluation (GPU cluster)
+az ml job create \
+  --file azure/ml_jobs/eval_job.yaml \
+  --resource-group $RG --workspace-name $WS --stream
 ```
+
+> **Tip:** pipe inputs / outputs between standalone jobs with `--set inputs.<name>=azureml:<job_name>:<output_name>`, or use the pipeline to wire them automatically.
 
 ### Launch the Streamlit demo locally
 
@@ -131,13 +152,20 @@ text2sql-grpo-azure-ml/
 ├── .github/workflows/        # CI: lint + unit tests
 ├── azure/
 │   ├── bicep/                # main.bicep (workspace, compute, endpoints)
-│   ├── ml_jobs/              # pipeline.yaml, data_prep, grpo_train, eval
-│   └── environments/         # conda_env.yml + environment.yml
+│   ├── ml_jobs/
+│   │   ├── pipeline.yaml     # End-to-end pipeline (data prep → train → eval)
+│   │   ├── data_prep_job.yaml
+│   │   ├── grpo_train_job.yaml
+│   │   └── eval_job.yaml
+│   └── environments/
+│       ├── environment.yml   # Azure ML environment definition
+│       └── conda_env.yml     # Conda spec (PyTorch 2.4 + CUDA 12.1 + Unsloth)
 ├── configs/                  # grpo_config.yaml, training_args.yaml, reward_weights.yaml
 ├── data/
 │   ├── prep/                 # download_spider_bird.py, serialize_schemas.py, schema_split.py
 │   └── synthetic/            # enterprise schemas (TPC-H, HR, Sales, Inventory)
 ├── src/
+│   ├── data_preparation.py   # Download, serialize schemas, produce HF + CSV splits
 │   ├── rewards.py            # format_reward, exec_reward, schema_fidelity_reward
 │   ├── grpo_trainer.py       # Unsloth + TRL GRPOTrainer wrapper
 │   ├── evaluator.py          # cross_schema_exec_acc, mlflow logging

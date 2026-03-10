@@ -39,6 +39,7 @@ tokenizer.max_length          Max sequence length
 from __future__ import annotations
 
 import argparse
+import json as _json
 import os
 from pathlib import Path
 from typing import Any
@@ -148,10 +149,15 @@ def train(
     # The record keys (prompt/solution/schema/source/db_id) are used by both
     # GRPOTrainer (prompt) and the reward wrapper (schema/source/db_id).
     def _to_record(examples: dict[str, list]) -> dict[str, list]:
+        raw_schemas = examples.get("schema", [{}] * len(examples["question"]))
         records = [
             make_prompt_record(
                 question=examples["question"][i],
-                schema=examples.get("schema", [{}] * len(examples["question"]))[i],
+                # Schema is stored as a JSON string in the HF dataset (to keep
+                # Arrow types uniform across databases with different structures).
+                # Parse it back to a dict if needed.
+                schema=_json.loads(raw_schemas[i])
+                    if isinstance(raw_schemas[i], str) else raw_schemas[i],
                 answer=examples["SQL"][i],
                 source=examples["source"][i],
                 db_id=examples["db_id"][i],

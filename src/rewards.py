@@ -36,6 +36,7 @@ SQLite files:
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from typing import Any
@@ -62,11 +63,18 @@ def extract_sql(text: str) -> str | None:
     """
     m = _SQL_FENCE_RE.search(text)
     if m:
-        return m.group(1).strip()
-    m = _INLINE_SQL_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    return None
+        sql = m.group(1).strip()
+    else:
+        m = _INLINE_SQL_RE.search(text)
+        if m:
+            sql = m.group(1).strip()
+        else:
+            return None
+    # Normalise backslash-escaped quotes (\') → SQL-standard doubled quote ('')
+    sql = sql.replace("\\'", "''")
+    # Normalise bare apostrophes inside words (O'Gallagher → O''Gallagher)
+    sql = re.sub(r"(?<=[a-zA-Z])'(?=[a-zA-Z])", "''", sql)
+    return sql
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +128,7 @@ def _exec_on_sqlite(
     sql: str,
     db_path: str | None = None,
     source: str | None = None,
-    base_path: str = "/kaggle/working/",
+    base_path: str = os.environ.get("TEXT2SQL_RAWDATA_DIR", "/kaggle/working/"),
 ) -> tuple[bool, str | None]:
     """Execute *sql* against the correct SQLite database and return the result.
 
@@ -301,9 +309,9 @@ def schema_fidelity_reward(
             rewards.append(0.5)
             continue
 
-        tables_in_schema = set(schema.keys())
-        columns_in_schema = {col for cols in schema.values() for col in cols}
-        ref_tables, ref_columns = _extract_schema_items(sql)
+        tables_in_schema  = {k.lower() for k in schema.keys()}
+        columns_in_schema = {col.lower() for cols in schema.values() for col in cols}
+        ref_tables, ref_columns = _extract_schema_items(sql)  # already lowercased
 
         all_refs = ref_tables | ref_columns
         if not all_refs:
