@@ -1,5 +1,18 @@
 """
 utils.py – Shared utilities for the Text-to-SQL GRPO project.
+
+Key helpers
+-----------
+extract_sql_from_text   Extract the first SQL block from a model response.
+build_prompt            Build a chat-format prompt (list of dicts) for a
+                        question + schema pair, matching the notebook's
+                        ``_SYSTEM_PROMPT`` convention.
+make_prompt_record      Convert a dataset row into a training-ready dict with
+                        keys: prompt, solution, schema, source, db_id.
+serialize_schema        Compact string representation of a schema dict.
+parse_schema_string     Parse a serialised schema string back to a dict.
+load_schema_lookup      Load the schema_lookup.json produced by data prep.
+normalise_sql           Parse → re-serialise SQL for consistent comparison.
 """
 
 from __future__ import annotations
@@ -20,7 +33,11 @@ _INLINE_SQL_RE = re.compile(r"(SELECT\s+.+?;)", re.DOTALL | re.IGNORECASE)
 
 
 def extract_sql_from_text(text: str) -> str | None:
-    """Extract the first SQL block from *text*, or ``None`` if not found."""
+    """Extract the first SQL block from *text*, or ``None`` if not found.
+
+    Checks for a fenced ```sql``` block first, then falls back to a bare
+    ``SELECT … ;`` pattern.
+    """
     m = _SQL_FENCE_RE.search(text)
     if m:
         return m.group(1).strip()
@@ -45,39 +62,85 @@ def build_prompt(
     question: str,
     schema: dict[str, list[str]] | str | None = None,
     system_prompt: str = _SYSTEM_PROMPT,
-) -> str:
-    """Return a formatted prompt string for the model.
+) -> list[dict[str, str]]:
+    """Return a chat-format prompt as a list of message dicts.
+
+    The output is compatible with ``tokenizer.apply_chat_template`` and with
+    TRL's GRPOTrainer which expects each training example's ``"prompt"`` field
+    to be a list of ``{"role": …, "content": …}`` dicts.
+
+    Parameters
+    ----------
+    question:
+        Natural language question to answer with SQL.
+    schema:
+        Either a dict mapping table names to column lists, or a pre-serialised
+        string.  ``None`` omits the schema section from the user message.
+    system_prompt:
+        System instruction for the assistant turn.
+
+    Returns
+    -------
+    List of two dicts: a system message and a user message.
+
+    Example
+    -------
+    >>> build_prompt("How many authors are there?", {"author": ["aid", "name"]})
+    [
+        {"role": "system", "content": "You are an expert SQL assistant…"},
+        {"role": "user",   "content": "### Question\nHow many authors…\n### Schema\n…"},
+    ]
+    """
+    parts: list[str] = []
+    parts.append(f"### Question\n{question}")
+
+    if schema is not None:
+        schema_str = schema if isinstance(schema, str) else str(schema)
+        parts.append(f"### Schema\n{schema_str}")
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "\n".join(parts)},
+    ]
+
+
+def make_prompt_record(
+    question: str,
+    schema: dict[str, list[str]] | str,
+    answer: str,
+    source: str,
+    db_id: str,
+) -> dict[str, Any]:
+    """Build a training-ready record from a single dataset row.
+
+    This mirrors the notebook's ``_make_prompt`` function and produces the
+    dict format expected by GRPOTrainer and the reward functions.
 
     Parameters
     ----------
     question:
         Natural language question.
     schema:
-        Either a dict mapping table names to column lists, or a serialised
-        string. ``None`` omits the schema section.
-    system_prompt:
-        System instruction prepended to the prompt.
+        Schema dict or pre-serialised string.
+    answer:
+        Gold SQL string (used as ``solution`` during evaluation).
+    source:
+        Dataset source – ``"spider"`` or ``"bird"``.
+    db_id:
+        Database identifier (e.g. ``"academic"``).
 
     Returns
     -------
-    A single string in ChatML / instruction format.
+    Dict with keys: ``prompt``, ``solution``, ``schema``, ``source``, ``db_id``.
     """
-    schema_section = ""
-    if schema:
-        if isinstance(schema, dict):
-            lines = []
-            for table, cols in schema.items():
-                lines.append(f"Table {table}: ({', '.join(cols)})")
-            schema_section = "\n".join(lines)
-        else:
-            schema_section = str(schema)
-
-    parts = [f"### System\n{system_prompt}"]
-    if schema_section:
-        parts.append(f"### Schema\n{schema_section}")
-    parts.append(f"### Question\n{question}")
-    parts.append("### SQL\n")
-    return "\n\n".join(parts)
+    prompt = build_prompt(question, schema)
+    return {
+        "prompt": prompt,
+        "solution": answer,
+        "schema": schema,
+        "source": source,
+        "db_id": db_id,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -86,16 +149,32 @@ def build_prompt(
 
 
 def load_schema_lookup(data_dir: str) -> dict[str, dict[str, list[str]]]:
-    """Load a schema lookup dict from *data_dir/schema_lookup.json* if present."""
+    """Load a schema lookup dict from *data_dir/schema_lookup.json* if present.
+
+    The JSON file is expected to be a list of ``{"db_id": …, "schema": …}``
+    objects as produced by the data-preparation pipeline.
+
+    Returns an empty dict if the file does not exist.
+    """
     path = Path(data_dir) / "schema_lookup.json"
-    if path.exists():
-        with open(path) as fh:
-            return json.load(fh)
-    return {}
+    if not path.exists():
+        return {}
+    with open(path) as fh:
+        records = json.load(fh)
+    # Support both list-of-objects and plain dict formats
+    if isinstance(records, list):
+        return {r["db_id"]: r["schema"] for r in records}
+    return records  # type: ignore[return-value]
 
 
 def serialize_schema(schema: dict[str, list[str]]) -> str:
-    """Serialise a schema dict to a compact string representation."""
+    """Serialise a schema dict to a compact pipe-delimited string.
+
+    Example
+    -------
+    >>> serialize_schema({"author": ["aid", "name"]})
+    'author(aid, name)'
+    """
     lines = [f"{table}({', '.join(cols)})" for table, cols in schema.items()]
     return " | ".join(lines)
 
@@ -121,7 +200,10 @@ def parse_schema_string(schema_str: str) -> dict[str, list[str]]:
 
 
 def normalise_sql(sql: str, dialect: str = "sqlite") -> str:
-    """Parse and re-serialise *sql* for consistent comparison."""
+    """Parse and re-serialise *sql* for consistent comparison.
+
+    Returns the original (stripped) string if sqlglot cannot parse it.
+    """
     try:
         return sqlglot.transpile(sql, read=dialect, write=dialect, pretty=False)[0]
     except sqlglot.errors.ParseError:

@@ -1,196 +1,281 @@
 """
-evaluator.py – Cross-schema execution accuracy evaluation with MLflow logging.
+evaluator.py – Baseline and post-training evaluation for Text-to-SQL.
+
+Evaluation pipeline
+-------------------
+The notebook runs two evaluation passes on the test split:
+
+1. **Baseline** – zero-shot inference with the base model (no LoRA).
+   Establishes the pre-training performance floor.
+
+2. **Fine-tuned** – inference with the GRPO-trained LoRA adapter loaded.
+   Measures the improvement from GRPO fine-tuning.
+
+Both passes call ``combined_reward`` (format + exec + schema_fidelity) on
+every prediction and report per-source mean scores so Spider and BIRD
+results can be compared independently.
+
+Key functions
+-------------
+run_prompt          Generate a SQL completion for a single chat-format prompt
+                    using Unsloth's ``model.fast_generate``.
+compute_rewards     Batch-score a DataFrame of completions with
+                    ``combined_reward``.
+evaluate            End-to-end pipeline: load model → generate → score →
+                    save CSVs → log to MLflow.
 
 Usage (CLI)
 -----------
     python evaluator.py \\
         --model-dir outputs/checkpoint \\
+        --lora-path outputs/checkpoint/grpo_saved_lora \\
         --test-data data/splits/test \\
         --output-dir outputs/eval \\
-        --mlflow-tracking-uri azureml://... \\
-        --dialects sqlite postgresql
+        --mlflow-tracking-uri azureml://...
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
-import tempfile
 from pathlib import Path
 from typing import Any
 
-import sqlglot
+import pandas as pd
 from loguru import logger
 
-from utils import build_prompt, extract_sql_from_text
+from rewards import combined_reward
+from utils import extract_sql_from_text
 
 
 # ---------------------------------------------------------------------------
-# Execution helpers
+# Inference helpers
 # ---------------------------------------------------------------------------
 
 
-def _execute_sql(sql: str, db_path: str | None = None, dialect: str = "sqlite") -> bool:
-    """Return True if *sql* (transpiled to SQLite) executes without error."""
-    try:
-        transpiled = sqlglot.transpile(sql, read=dialect, write="sqlite")[0]
-    except sqlglot.errors.ParseError:
-        return False
+def run_prompt(
+    prompt: list[dict[str, str]],
+    model: Any,
+    tokenizer: Any,
+    sampling_params: Any,
+    lora_request: Any | None = None,
+) -> str:
+    """Generate a SQL completion for a single chat-format prompt.
 
-    conn = sqlite3.connect(db_path or ":memory:")
-    try:
-        conn.execute(transpiled)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-    finally:
-        conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Cross-schema execution accuracy
-# ---------------------------------------------------------------------------
-
-
-def cross_schema_exec_acc(
-    predictions: list[str],
-    references: list[str],
-    db_paths: list[str | None] | None = None,
-    dialects: list[str] | None = None,
-) -> dict[str, float]:
-    """Compute execution accuracy across schemas and dialects.
+    Uses Unsloth's ``model.fast_generate`` (vLLM-backed) for efficient
+    batched inference.  Pass ``lora_request`` to enable a LoRA adapter;
+    omit it (or pass ``None``) for zero-shot baseline inference.
 
     Parameters
     ----------
-    predictions:
-        Predicted SQL strings.
-    references:
-        Gold SQL strings.
-    db_paths:
-        Per-sample SQLite DB paths (or ``None`` for in-memory).
-    dialects:
-        List of dialects to evaluate against. Results are reported per dialect
-        and as an average.
+    prompt:
+        Chat-format prompt as a list of ``{"role": …, "content": …}`` dicts
+        (the ``"prompt"`` field from a training record).
+    model:
+        Unsloth ``FastLanguageModel`` instance (with ``fast_inference=True``).
+    tokenizer:
+        Corresponding tokenizer.
+    sampling_params:
+        vLLM ``SamplingParams`` instance (temperature, top_p, max_tokens).
+    lora_request:
+        If provided, the LoRA adapter is activated during generation.
+        Obtain via ``model.load_lora(lora_path)``.
 
     Returns
     -------
-    Dict mapping ``"exec_acc_<dialect>"`` and ``"exec_acc_avg"`` to floats.
+    The raw generated text (assistant turn content).
     """
-    dialects = dialects or ["sqlite"]
-    n = len(predictions)
-    paths = db_paths if db_paths is not None else [None] * n
+    text = tokenizer.apply_chat_template(
+        prompt, tokenize=False, add_generation_prompt=True
+    )
+    kwargs: dict[str, Any] = {"sampling_params": sampling_params}
+    if lora_request is not None:
+        kwargs["lora_request"] = lora_request
 
-    results: dict[str, float] = {}
-    all_accs: list[float] = []
+    output = model.fast_generate(text, **kwargs)[0].outputs[0].text
+    return output
 
-    for dialect in dialects:
-        correct = 0
-        for pred, ref, db_path in zip(predictions, references, paths):
-            pred_ok = _execute_sql(pred, db_path, dialect)
-            ref_ok = _execute_sql(ref, db_path, dialect)
-            # Credit the prediction only if the gold also executes
-            if ref_ok and pred_ok:
-                correct += 1
-            elif not ref_ok:
-                # Gold doesn't execute either (schema issue) – skip
-                n -= 1
 
-        acc = correct / n if n > 0 else 0.0
-        results[f"exec_acc_{dialect}"] = acc
-        all_accs.append(acc)
+def compute_rewards(
+    dataset: pd.DataFrame,
+    completion_col: str = "completion",
+) -> list[float]:
+    """Score all rows in *dataset* using ``combined_reward``.
 
-    results["exec_acc_avg"] = sum(all_accs) / len(all_accs) if all_accs else 0.0
-    return results
+    Wraps each completion in the expected TRL message format and passes
+    per-row ``schema``, ``source``, and ``db_id`` columns to the reward
+    functions so execution is routed to the correct SQLite file.
+
+    Parameters
+    ----------
+    dataset:
+        DataFrame with at minimum columns:
+        ``completion``, ``prompt``, ``schema``, ``source``, ``db_id``.
+    completion_col:
+        Name of the column containing the model's generated SQL text.
+
+    Returns
+    -------
+    List of combined reward floats, one per row.
+    """
+    # Wrap each completion string in the TRL message-list format expected
+    # by the reward functions.  SQL is enclosed in a code fence so
+    # ``extract_sql`` can locate it.
+    completions = [
+        [{"role": "assistant", "content": f"```sql\n{row}\n```"}]
+        for row in dataset[completion_col]
+    ]
+    return combined_reward(
+        completions,
+        prompts=dataset["prompt"].tolist(),
+        schemas=dataset["schema"].tolist(),
+        source=dataset["source"].tolist(),
+        db_paths=dataset["db_id"].tolist(),
+    )
 
 
 # ---------------------------------------------------------------------------
-# Main evaluation pipeline
+# End-to-end evaluation pipeline
 # ---------------------------------------------------------------------------
 
 
 def evaluate(
     model_dir: str,
-    test_data_dir: str,
+    test_data_path: str,
     output_dir: str,
+    lora_path: str | None = None,
     mlflow_tracking_uri: str | None = None,
-    dialects: list[str] | None = None,
+    temperature: float = 0.7,
+    top_p: float = 0.95,
+    max_tokens: int = 1024,
 ) -> dict[str, float]:
-    """End-to-end evaluation: generate SQL → measure exec accuracy → log to MLflow."""
-    import mlflow
-    from datasets import load_from_disk
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    """Run baseline and (optionally) fine-tuned evaluation on the test split.
 
-    dialects = dialects or ["sqlite"]
+    Steps
+    -----
+    1. Load the Unsloth model and tokeniser.
+    2. Run zero-shot inference on every test example (baseline).
+    3. If ``lora_path`` is provided, re-run inference with the LoRA adapter
+       loaded (fine-tuned evaluation).
+    4. Score both passes with ``combined_reward``.
+    5. Save per-row CSVs and aggregate metrics JSON to ``output_dir``.
+    6. Log metrics to MLflow.
+
+    Parameters
+    ----------
+    model_dir:
+        HuggingFace model id or local checkpoint directory.
+    test_data_path:
+        Path to the test CSV produced by the data-prep notebook.
+    output_dir:
+        Directory for saving results.
+    lora_path:
+        Path to the saved LoRA adapter (``grpo_saved_lora/``).
+        If ``None``, only baseline evaluation is performed.
+    mlflow_tracking_uri:
+        Optional MLflow tracking URI.
+    temperature / top_p / max_tokens:
+        Sampling parameters for generation.
+
+    Returns
+    -------
+    Dict of metric names → values (baseline and fine-tuned combined rewards
+    per source, and overall averages).
+    """
+    from tqdm.auto import tqdm
+    from vllm import SamplingParams  # type: ignore
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     # ── MLflow ─────────────────────────────────────────────
+    import mlflow
+
     if mlflow_tracking_uri:
         mlflow.set_tracking_uri(mlflow_tracking_uri)
     mlflow.set_experiment("text2sql-evaluation")
 
-    # ── Load model ─────────────────────────────────────────
+    # ── Load model (Unsloth) ───────────────────────────────
     try:
         from unsloth import FastLanguageModel  # type: ignore
 
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_dir,
             max_seq_length=2048,
-            dtype=None,
             load_in_4bit=True,
+            fast_inference=True,
         )
-        FastLanguageModel.for_inference(model)
     except ImportError:
-        logger.warning("unsloth not installed – falling back to plain transformers.")
+        logger.warning("unsloth not installed – using plain transformers (no fast_generate).")
+        from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
+
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
         model = AutoModelForCausalLM.from_pretrained(model_dir)
 
-    model.eval()
-
-    # ── Load test data ─────────────────────────────────────
-    dataset = load_from_disk(test_data_dir)
-    questions = dataset["question"]
-    gold_sqls = dataset["sql"]
-    schemas = dataset.get("schema", [{}] * len(questions))
-    db_paths = dataset.get("db_path", [None] * len(questions))
-
-    # ── Generate predictions ───────────────────────────────
-    predictions: list[str] = []
-    for question, schema in zip(questions, schemas):
-        prompt = build_prompt(question, schema)
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        outputs = model.generate(**inputs, max_new_tokens=512, temperature=0.0, do_sample=False)
-        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        sql = extract_sql_from_text(decoded) or ""
-        predictions.append(sql)
-
-    # ── Compute metrics ────────────────────────────────────
-    metrics = cross_schema_exec_acc(
-        predictions=predictions,
-        references=gold_sqls,
-        db_paths=db_paths,
-        dialects=dialects,
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
     )
 
-    logger.info(f"Evaluation results: {metrics}")
+    # ── Load test data ─────────────────────────────────────
+    test_df = pd.read_csv(test_data_path)
+    tqdm.pandas(desc="Generating SQL")
 
-    # ── Save predictions ───────────────────────────────────
-    records = [
-        {"question": q, "prediction": p, "gold": g}
-        for q, p, g in zip(questions, predictions, gold_sqls)
-    ]
-    with open(output_path / "predictions.json", "w") as fh:
-        json.dump(records, fh, indent=2)
+    metrics: dict[str, float] = {}
 
-    with open(output_path / "metrics.json", "w") as fh:
-        json.dump(metrics, fh, indent=2)
-
-    # ── Log to MLflow ──────────────────────────────────────
     with mlflow.start_run():
+        # ── Baseline (no LoRA) ─────────────────────────────
+        logger.info("Running baseline inference (no LoRA)…")
+        baseline_df = test_df.copy()
+        baseline_df["completion"] = baseline_df["prompt"].progress_apply(
+            lambda p: run_prompt(p, model, tokenizer, sampling_params, lora_request=None)
+        )
+        baseline_df["reward"] = compute_rewards(baseline_df)
+
+        baseline_csv = output_path / "baseline_results.csv"
+        baseline_df.to_csv(baseline_csv, index=False)
+        logger.info(f"Baseline results saved to {baseline_csv}")
+
+        baseline_scores = baseline_df.groupby("source")["reward"].mean().to_dict()
+        baseline_avg = baseline_df["reward"].mean()
+        for src, score in baseline_scores.items():
+            metrics[f"baseline_reward_{src}"] = round(score, 4)
+        metrics["baseline_reward_avg"] = round(baseline_avg, 4)
+
+        logger.info(f"Baseline scores per source: {baseline_scores}")
+        logger.info(f"Baseline average reward: {baseline_avg:.4f}")
+
+        # ── Fine-tuned (with LoRA) ─────────────────────────
+        if lora_path is not None:
+            logger.info(f"Running fine-tuned inference with LoRA from {lora_path}…")
+            lora_request = model.load_lora(lora_path)
+
+            finetuned_df = test_df.copy()
+            finetuned_df["completion"] = finetuned_df["prompt"].progress_apply(
+                lambda p: run_prompt(p, model, tokenizer, sampling_params, lora_request)
+            )
+            finetuned_df["reward"] = compute_rewards(finetuned_df)
+
+            finetuned_csv = output_path / "finetuned_results.csv"
+            finetuned_df.to_csv(finetuned_csv, index=False)
+            logger.info(f"Fine-tuned results saved to {finetuned_csv}")
+
+            finetuned_scores = finetuned_df.groupby("source")["reward"].mean().to_dict()
+            finetuned_avg = finetuned_df["reward"].mean()
+            for src, score in finetuned_scores.items():
+                metrics[f"finetuned_reward_{src}"] = round(score, 4)
+            metrics["finetuned_reward_avg"] = round(finetuned_avg, 4)
+
+            logger.info(f"Fine-tuned scores per source: {finetuned_scores}")
+            logger.info(f"Fine-tuned average reward: {finetuned_avg:.4f}")
+
+        # ── Log & save metrics ──────────────────────────────
         mlflow.log_metrics(metrics)
-        mlflow.log_artifact(str(output_path / "predictions.json"))
-        mlflow.log_artifact(str(output_path / "metrics.json"))
+        metrics_json = output_path / "metrics.json"
+        with open(metrics_json, "w") as fh:
+            json.dump(metrics, fh, indent=2)
+        mlflow.log_artifact(str(metrics_json))
 
     return metrics
 
@@ -201,12 +286,19 @@ def evaluate(
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Text-to-SQL evaluator")
-    p.add_argument("--model-dir", required=True)
-    p.add_argument("--test-data", required=True)
-    p.add_argument("--output-dir", required=True)
+    p = argparse.ArgumentParser(description="Text-to-SQL evaluator (baseline + fine-tuned)")
+    p.add_argument("--model-dir", required=True, help="HuggingFace model id or local path")
+    p.add_argument("--test-data", required=True, help="Path to test CSV")
+    p.add_argument("--output-dir", required=True, help="Directory for results")
+    p.add_argument(
+        "--lora-path",
+        default=None,
+        help="Path to saved LoRA adapter for fine-tuned evaluation",
+    )
     p.add_argument("--mlflow-tracking-uri", default=None)
-    p.add_argument("--dialects", nargs="+", default=["sqlite"])
+    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--top-p", type=float, default=0.95)
+    p.add_argument("--max-tokens", type=int, default=1024)
     return p.parse_args()
 
 
@@ -214,8 +306,11 @@ if __name__ == "__main__":
     args = _parse_args()
     evaluate(
         model_dir=args.model_dir,
-        test_data_dir=args.test_data,
+        test_data_path=args.test_data,
         output_dir=args.output_dir,
+        lora_path=args.lora_path,
         mlflow_tracking_uri=args.mlflow_tracking_uri,
-        dialects=args.dialects,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        max_tokens=args.max_tokens,
     )
