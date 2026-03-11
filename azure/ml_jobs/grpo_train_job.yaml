@@ -2,7 +2,7 @@ $schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
 
 type: command
 display_name: text2sql-grpo-training
-description: Fine-tune Qwen2.5-Coder-7B-Instruct with GRPO using Unsloth + TRL on the Spider/BIRD training split.
+description: Fine-tune unsloth/Qwen2.5-3B-Instruct with GRPO using Unsloth + TRL on the Spider/BIRD training split.
 experiment_name: text2sql-grpo
 
 code: ../../
@@ -24,16 +24,16 @@ command: >-
   --train-data ${{inputs.hf_splits}}/train
   --val-data ${{inputs.hf_splits}}/val
   --output-dir ${{outputs.model_dir}}
-  $[[--mlflow-tracking-uri ${{inputs.mlflow_tracking_uri}}]]
 
 inputs:
   hf_splits:
     type: uri_folder
+    path: azureml://datastores/workspaceblobstore/paths/azureml/patient_battery_wljgxq64z8/hf_splits/
     mode: ro_mount
   rawdata_dir:
     type: uri_folder
+    path: azureml://datastores/workspaceblobstore/paths/azureml/patient_battery_wljgxq64z8/rawdata_dir/
     mode: ro_mount
-  mlflow_tracking_uri: ""
 
 outputs:
   model_dir:

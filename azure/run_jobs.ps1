@@ -51,7 +51,7 @@
     .\run_jobs.ps1 -Mode job -Job data_prep
 #>
 
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding = $false)]
 param (
     [string] $ResourceGroup = "txt2sql-grpo-rg",
     [string] $Workspace = "txt2sql-grpo-ws",
@@ -68,6 +68,7 @@ param (
     [int]    $SampleSize  = 400,
 
     [switch] $Stream
+
 )
 
 Set-StrictMode -Version Latest
@@ -93,7 +94,7 @@ function Submit-Job {
         [string]   $YamlFile,
         [string[]] $SetArgs = @()
     )
-    $cmd = @("ml", "job", "create", "--file", $YamlFile) + $BaseArgs + $SetArgs + $StreamFlag
+    $cmd = @("ml", "job", "create", "--file", $YamlFile) + $BaseArgs + $SetArgs + $StreamFlag 
     Write-Host "`n► az $($cmd -join ' ')" -ForegroundColor Cyan
     az @cmd
     if ($LASTEXITCODE -ne 0) { Write-Error "Job submission failed."; exit 1 }
@@ -104,17 +105,19 @@ function Assert-EnvironmentExists {
         "ml", "environment", "show",
         "--name", $EnvironmentName,
         "--label", "latest"
-    ) + $BaseArgs + @("--only-show-errors", "--query", "name", "-o", "tsv")
+    ) + $BaseArgs + @("--only-show-errors", "--query", "name", "-o", "tsv") 
 
+    Write-Host "Checking env $cmd" -ForegroundColor Magenta
+    
     $environmentNameResult = az @cmd 2>$null
+
     if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($environmentNameResult)) {
         return
     }
 
     Write-Host "`nAzure ML environment '$EnvironmentName@latest' was not found in workspace '$Workspace'." -ForegroundColor Yellow
     if (Test-Path $CreateEnvPs1) {
-        Write-Host "Create it first with:" -ForegroundColor Yellow
-        Write-Host "  .\create_env.ps1 -ResourceGroup $ResourceGroup -Workspace $Workspace" -ForegroundColor Cyan
+        Write-Host "Create it first with .\create_env.ps1" -ForegroundColor Yellow
     }
     else {
         Write-Host "Register it first with az ml environment create --file azure/environments/environment.yml ..." -ForegroundColor Yellow
@@ -125,15 +128,15 @@ function Assert-EnvironmentExists {
 }
 
 # ── Verify az CLI login ──────────────────────────────────────────────────────
-az account show --output none
+az account show --output none 
 
 if ($LASTEXITCODE -ne 0) { Write-Error "Not logged in. Run: az login"; exit 1 }
 
-$mlExt = az extension list --query "[?name=='ml'].name" -o tsv
+$mlExt = az extension list --query "[?name=='ml'].name" -o tsv 
 
 if (-not $mlExt) {
-    Write-Host "Installing Azure ML CLI extension..." -ForegroundColor Yellow
-    az extension add --name ml --yes
+    Write-Error "Azure ML CLI extension is required. Run: az extension add --name ml"
+    exit 1
 }
 
 Assert-EnvironmentExists
@@ -165,8 +168,16 @@ $jobYaml = switch ($Job) {
 $jobCompute = if ($Job -eq "data_prep") { $CpuCluster } else { $GpuCluster }
 
 Write-Host "`n=== Submitting job: $Job ===" -ForegroundColor Magenta
-Submit-Job -YamlFile $jobYaml -SetArgs @(
-    "--set", "inputs.sample_size=$SampleSize",
+$jobSetArgs = @(
     "--set", "compute=azureml:$jobCompute"
 )
+
+if ($Job -eq "data_prep") {
+    $jobSetArgs += @("--set", "inputs.sample_size=$SampleSize")
+}
+elseif ($Job -in @("train", "eval")) {
+    Write-Host "Standalone '$Job' jobs require their data inputs to be supplied explicitly via the job YAML or additional --set arguments." -ForegroundColor Yellow
+}
+
+Submit-Job -YamlFile $jobYaml -SetArgs $jobSetArgs
 Write-Host "`n✅ Job submitted." -ForegroundColor Green

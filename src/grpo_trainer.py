@@ -136,10 +136,7 @@ def train(
         )
     except ImportError:
         logger.warning("unsloth not installed – falling back to plain transformers.")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        model = AutoModelForCausalLM.from_pretrained(grpo_cfg["model"]["name_or_path"])
-        tokenizer = AutoTokenizer.from_pretrained(grpo_cfg["model"]["name_or_path"])
+        raise RuntimeError("Unsloth is required for this training script.")
 
     # ── Dataset ────────────────────────────────────────────
     train_dataset = load_from_disk(train_data_dir)

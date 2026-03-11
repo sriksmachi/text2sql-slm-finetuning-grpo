@@ -40,20 +40,23 @@ param (
     [string] $Image,
     [string] $ImageName = "text2sql-grpo",
     [string] $ImageTag = "env-v1",
-    [string] $Version,
+    [string] $Version = "latest",
     [switch] $Stream
 )
 
 Set-StrictMode -Version Latest
+
 $ErrorActionPreference = "Stop"
 
 az account show --output none
+
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Not logged in. Run: az login"
     exit 1
 }
 
 $mlExt = az extension list --query "[?name=='ml'].name" -o tsv
+
 if (-not $mlExt) {
     Write-Error "Azure ML CLI extension is required. Run: az extension add --name ml"
     exit 1
@@ -81,10 +84,6 @@ if (-not $Image) {
     }
 
     $Image = "$loginServer/$imageRef"
-}
-
-if (-not $Version) {
-    $Version = Get-Date -Format "yyyyMMddHHmmss"
 }
 
 $temporarySpecPath = Join-Path $env:TEMP "text2sql-prebuilt-env-$Version.yml"

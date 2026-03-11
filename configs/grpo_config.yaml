@@ -2,14 +2,15 @@
 # All values here mirror TRL GRPOConfig fields
 
 model:
-  name_or_path: "unsloth/Qwen2.5-Coder-7B-Instruct-bnb-4bit"
+  name_or_path: "unsloth/Qwen2.5-3B-Instruct"
   torch_dtype: "bfloat16"
   load_in_4bit: true
   use_gradient_checkpointing: "unsloth"
+  lora_rank: 32
 
 grpo:
   # Number of rollout samples per prompt
-  num_generations: 8
+  num_generations: 2
   # Max tokens to generate during rollout
   max_new_tokens: 512
   # Temperature for sampling

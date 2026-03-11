@@ -14,18 +14,13 @@
 flowchart LR
     subgraph Data["Data Layer"]
         A[Spider / BIRD datasets] --> B[serialize_schemas.py]
-        C[Synthetic enterprise schemas\nTPC-H · HR · Sales · Inventory] --> B
         B --> D[schema_split.py\nschema-level train/val/test]
     end
 
     subgraph Training["GRPO Training  · Azure ML"]
         D --> E[GRPOTrainer\nUnsloth + TRL]
-        E --> F{Reward Functions}
-        F --> G[format_reward\n+0.2]
-        F --> H[exec_reward\nmulti-dialect +0.5]
-        F --> I[schema_fidelity_reward\n+0.3]
-        G & H & I --> E
-        E --> J[Fine-tuned LLM\nQwen2.5-Coder-7B]
+        E --> F{Reward Functions = format_reward, exec_reward\nmulti-dialect, schema_fidelity_reward}
+        E --> J[Fine-tuned LLM\nQwen2.5-3B-Instruct]
     end
 
     subgraph Eval["Evaluation"]
