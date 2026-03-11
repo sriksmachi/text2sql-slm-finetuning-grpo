@@ -1,47 +1,45 @@
 # Core ML/AI
-torch>=2.2.0
-transformers>=4.40.0
-accelerate>=0.29.0
-peft>=0.10.0
-bitsandbytes>=0.43.0
-trl>=0.8.6
-datasets>=2.18.0
+torch
+transformers
+accelerate
+peft
+bitsandbytes
+trl
+datasets
 unsloth
 
 # SQL parsing and execution
-sqlglot>=23.0.0
-sqlparse>=0.5.0
+sqlglot
+sqlparse
 
 # Azure
-mlflow>=2.12.0
-azure-ai-ml>=1.15.0
-azure-identity>=1.16.0
-openai>=1.40.0
+mlflow
+azureml-mlflow
+azure-ai-ml
+azure-identity
+openai
 
 # Data / compute
-pandas>=2.2.0
-pyarrow>=15.0.0
-numpy>=1.26.0
-tqdm>=4.66.0
+pandas
+pyarrow
+numpy
+tqdm
 
 # Config and validation
-pydantic>=2.6.0
-pyyaml>=6.0.1
-python-dotenv>=1.0.0
+pydantic
+pyyaml
+python-dotenv
 
 # Demo
-streamlit>=1.33.0
-requests>=2.31.0
+streamlit
+requests
 
 # Logging
-loguru>=0.7.0
+loguru
 
 # Dev / test
-pytest>=8.1.0
-pytest-cov>=5.0.0
-ruff>=0.4.0
-black>=24.3.0
-isort>=5.13.0
-
-openai
-azure-identity
+pytest
+pytest-cov
+ruff
+black
+isort

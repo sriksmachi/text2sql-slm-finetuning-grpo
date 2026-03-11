@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,7 @@ import pandas as pd
 from loguru import logger
 
 from rewards import combined_reward
-from utils import extract_sql_from_text
+from utils import configure_mlflow_tracking, extract_sql_from_text
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +192,12 @@ def evaluate(
     # ── MLflow ─────────────────────────────────────────────
     import mlflow
 
-    if mlflow_tracking_uri:
-        mlflow.set_tracking_uri(mlflow_tracking_uri)
-    mlflow.set_experiment("text2sql-evaluation")
+    mlflow_enabled, mlflow_message = configure_mlflow_tracking(
+        mlflow_tracking_uri,
+        "text2sql-evaluation",
+    )
+    if not mlflow_enabled and mlflow_message:
+        logger.warning(f"MLflow disabled: {mlflow_message}")
 
     # ── Load model (Unsloth) ───────────────────────────────
     try:
@@ -224,7 +228,8 @@ def evaluate(
 
     metrics: dict[str, float] = {}
 
-    with mlflow.start_run():
+    run_context = mlflow.start_run() if mlflow_enabled else nullcontext()
+    with run_context:
         # ── Baseline (no LoRA) ─────────────────────────────
         logger.info("Running baseline inference (no LoRA)…")
         baseline_df = test_df.copy()
@@ -271,11 +276,13 @@ def evaluate(
             logger.info(f"Fine-tuned average reward: {finetuned_avg:.4f}")
 
         # ── Log & save metrics ──────────────────────────────
-        mlflow.log_metrics(metrics)
+        if mlflow_enabled:
+            mlflow.log_metrics(metrics)
         metrics_json = output_path / "metrics.json"
         with open(metrics_json, "w") as fh:
             json.dump(metrics, fh, indent=2)
-        mlflow.log_artifact(str(metrics_json))
+        if mlflow_enabled:
+            mlflow.log_artifact(str(metrics_json))
 
     return metrics
 

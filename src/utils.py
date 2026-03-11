@@ -208,3 +208,36 @@ def normalise_sql(sql: str, dialect: str = "sqlite") -> str:
         return sqlglot.transpile(sql, read=dialect, write=dialect, pretty=False)[0]
     except sqlglot.errors.ParseError:
         return sql.strip()
+
+
+def configure_mlflow_tracking(
+    tracking_uri: str | None,
+    experiment_name: str,
+) -> tuple[bool, str | None]:
+    """Configure MLflow tracking and return whether remote logging is enabled.
+
+    Azure ML tracking URIs require the ``azureml-mlflow`` plugin. If the
+    plugin isn't available, tracking is disabled instead of failing the job.
+    """
+    import mlflow
+
+    if not tracking_uri:
+        mlflow.set_experiment(experiment_name)
+        return True, None
+
+    if tracking_uri.startswith("azureml://"):
+        try:
+            import azureml.mlflow  # type: ignore  # noqa: F401
+        except ImportError:
+            return False, (
+                "MLflow tracking URI uses the azureml:// scheme, but the "
+                "azureml-mlflow plugin is not installed."
+            )
+
+    try:
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(experiment_name)
+    except Exception as exc:
+        return False, f"Failed to configure MLflow tracking: {exc}"
+
+    return True, None

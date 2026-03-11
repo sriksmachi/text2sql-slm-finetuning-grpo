@@ -39,8 +39,10 @@ tokenizer.max_length          Max sequence length
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json as _json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -50,12 +52,104 @@ from datasets import load_from_disk
 from loguru import logger
 
 from rewards import combined_reward
-from utils import make_prompt_record, load_schema_lookup
+from utils import configure_mlflow_tracking, make_prompt_record
+
+
+def _force_disable_flashinfer_sampler() -> None:
+    """Force-disable FlashInfer sampler before Unsloth/vLLM import."""
+    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+    os.putenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+
+_force_disable_flashinfer_sampler()
 
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
     with open(path) as fh:
         return yaml.safe_load(fh)
+
+
+def _assert_unsloth_runtime_compatibility() -> None:
+    """Fail early with an actionable error if the Torch build is incompatible."""
+    import torch
+
+    torch_version = torch.__version__.split("+")[0]
+    inductor_config = getattr(getattr(torch, "_inductor", None), "config", None)
+    if inductor_config is None:
+        raise RuntimeError(
+            "Incompatible Torch runtime for Unsloth. Expected a Torch build with "
+            "torch._inductor.config available. Rebuild the Azure ML image with "
+            "a torch 2.4.x build and unsloth[cu118-ampere-torch240]. "
+            f"Detected torch=={torch_version}."
+        )
+
+
+def _configure_vllm_runtime() -> None:
+    """Adjust vLLM environment flags for the current GPU before import."""
+    import torch
+
+    _force_disable_flashinfer_sampler()
+    logger.info(
+        "Configured VLLM_USE_FLASHINFER_SAMPLER="
+        f"{os.environ.get('VLLM_USE_FLASHINFER_SAMPLER')} before model load."
+    )
+
+    if not torch.cuda.is_available():
+        return
+
+    major, minor = torch.cuda.get_device_capability()
+
+    # FlashInfer sampler requires newer GPUs than V100/T4 class devices.
+    if major < 8:
+        _force_disable_flashinfer_sampler()
+        logger.info(
+            "Disabled FlashInfer sampler for GPU compute capability "
+            f"{major}.{minor}."
+        )
+
+    # Older or newer vLLM builds may warn on this env var; drop it unless a
+    # caller explicitly depends on it.
+    if "VLLM_ATTENTION_BACKEND" in os.environ:
+        os.environ.pop("VLLM_ATTENTION_BACKEND", None)
+
+
+def _log_runtime_versions() -> None:
+    """Log the resolved package/runtime versions for the current job."""
+    package_names = [
+        "torch",
+        "transformers",
+        "trl",
+        "datasets",
+        "unsloth",
+        "vllm",
+        "triton",
+        "xformers",
+        "bitsandbytes",
+        "mlflow",
+        "azureml-mlflow",
+        "azure-ai-ml",
+    ]
+
+    versions: dict[str, str] = {}
+    for package_name in package_names:
+        try:
+            versions[package_name] = importlib.metadata.version(package_name)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package_name] = "not-installed"
+
+    try:
+        import torch
+
+        versions["cuda_available"] = str(torch.cuda.is_available())
+        versions["torch_cuda"] = str(torch.version.cuda)
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability()
+            versions["gpu_name"] = torch.cuda.get_device_name(0)
+            versions["gpu_compute_capability"] = f"{major}.{minor}"
+    except Exception as exc:
+        versions["torch_runtime_probe"] = f"failed: {exc}"
+
+    logger.info(f"Resolved runtime versions: {versions}")
 
 
 def train(
@@ -103,21 +197,29 @@ def train(
 
     lora_rank: int = grpo_cfg["model"]["lora_rank"]
 
+    _log_runtime_versions()
+
     # ── MLflow ─────────────────────────────────────────────
-    if mlflow_tracking_uri:
-        mlflow.set_tracking_uri(mlflow_tracking_uri)
-    mlflow.set_experiment(train_cfg.get("run_name", "text2sql-grpo"))
+    mlflow_enabled, mlflow_message = configure_mlflow_tracking(
+        mlflow_tracking_uri,
+        train_cfg.get("run_name", "text2sql-grpo"),
+    )
+    if not mlflow_enabled and mlflow_message:
+        logger.warning(f"MLflow disabled: {mlflow_message}")
 
     # ── Model + tokeniser (Unsloth) ────────────────────────
     # Unsloth's FastLanguageModel wraps HuggingFace and adds kernel
     # optimisations, 4-bit quant, and vLLM fast-inference support.
     try:
+        _assert_unsloth_runtime_compatibility()
+        _configure_vllm_runtime()
         from unsloth import FastLanguageModel  # type: ignore
 
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=grpo_cfg["model"]["name_or_path"],
             max_seq_length=grpo_cfg["tokenizer"]["max_length"],
             load_in_4bit=grpo_cfg["model"].get("load_in_4bit", True),
+            # Match the working notebook path for GRPO rollouts.
             fast_inference=True,
             max_lora_rank=lora_rank,
             gpu_memory_utilization=0.9,
@@ -223,15 +325,17 @@ def train(
 
     # ── Run ────────────────────────────────────────────────
     lora_save_path = str(Path(output_dir) / "grpo_saved_lora")
-    with mlflow.start_run():
-        mlflow.log_params(
-            {
-                "model": grpo_cfg["model"]["name_or_path"],
-                "lora_rank": lora_rank,
-                "num_generations": grpo_cfg["grpo"]["num_generations"],
-                "beta": grpo_cfg["grpo"]["beta"],
-            }
-        )
+    run_context = mlflow.start_run() if mlflow_enabled else nullcontext()
+    with run_context:
+        if mlflow_enabled:
+            mlflow.log_params(
+                {
+                    "model": grpo_cfg["model"]["name_or_path"],
+                    "lora_rank": lora_rank,
+                    "num_generations": grpo_cfg["grpo"]["num_generations"],
+                    "beta": grpo_cfg["grpo"]["beta"],
+                }
+            )
         trainer.train()
         # Save only the LoRA delta weights (much smaller than the full model)
         model.save_lora(lora_save_path)

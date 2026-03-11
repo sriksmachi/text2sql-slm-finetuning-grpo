@@ -15,6 +15,7 @@ compute: azureml:gpu-cluster  # Standard_NC24ads_A100_v4 (1 × A100 40 GB)
 # so that exec_reward can locate the SQLite databases at runtime.
 environment_variables:
   TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
 
 command: >-
   python src/grpo_trainer.py
