@@ -30,19 +30,12 @@ inputs:
   hf_splits:
     type: uri_folder
     mode: ro_mount
-    description: HuggingFace Dataset splits produced by the data-prep job.
   rawdata_dir:
     type: uri_folder
     mode: ro_mount
-    description: Raw Spider + BIRD SQLite databases – mounted and exposed as TEXT2SQL_RAWDATA_DIR.
-  mlflow_tracking_uri:
-    type: string
-    default: ""
-    optional: true
-    description: "MLflow tracking URI (leave blank to use the workspace-default tracking)."
+  mlflow_tracking_uri: ""
 
 outputs:
   model_dir:
     type: uri_folder
     mode: rw_mount
-    description: Saved model weights + LoRA adapter (grpo_saved_lora sub-directory).

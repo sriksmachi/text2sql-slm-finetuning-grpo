@@ -30,35 +30,18 @@ inputs:
   model_dir:
     type: uri_folder
     mode: ro_mount
-    description: Fine-tuned model directory produced by the training job.
   csv_splits:
     type: uri_folder
     mode: ro_mount
-    description: CSV splits directory; evaluator reads test.csv from this folder.
   rawdata_dir:
     type: uri_folder
     mode: ro_mount
-    description: Raw Spider + BIRD SQLite databases – mounted and exposed as TEXT2SQL_RAWDATA_DIR.
-  mlflow_tracking_uri:
-    type: string
-    default: ""
-    optional: true
-    description: "MLflow tracking URI (leave blank to use the workspace-default tracking)."
-  temperature:
-    type: number
-    default: 0.0
-    description: Sampling temperature for vLLM inference (0 = greedy).
-  top_p:
-    type: number
-    default: 1.0
-    description: Nucleus sampling probability.
-  max_tokens:
-    type: integer
-    default: 512
-    description: Maximum number of output tokens per query.
+  mlflow_tracking_uri: ""
+  temperature: 0.0
+  top_p: 1.0
+  max_tokens: 512
 
 outputs:
   eval_results:
     type: uri_folder
     mode: rw_mount
-    description: JSON results file and per-example predictions logged as artefacts.

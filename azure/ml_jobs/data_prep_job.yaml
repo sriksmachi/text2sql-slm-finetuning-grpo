@@ -23,37 +23,21 @@ command: >-
   --seed ${{inputs.seed}}
 
 inputs:
-  sample_size:
-    type: integer
-    default: 400
-    description: Maximum number of Q/SQL pairs to include (0 = all).
-  train_ratio:
-    type: number
-    default: 0.7
-    description: Fraction of unique schemas in the training split.
-  val_ratio:
-    type: number
-    default: 0.15
-    description: Fraction of unique schemas in the validation split.
-  seed:
-    type: integer
-    default: 42
-    description: Random seed for reproducible schema-level splits.
+  sample_size: 400
+  train_ratio: 0.7
+  val_ratio: 0.15
+  seed: 42
 
 outputs:
   rawdata_dir:
     type: uri_folder
     mode: rw_mount
-    description: Raw Spider + BIRD SQLite databases (needed by exec_reward at training time).
   serialized_schemas:
     type: uri_folder
     mode: rw_mount
-    description: JSON schema lookup written by serialize_schemas.py.
   hf_splits:
     type: uri_folder
     mode: rw_mount
-    description: HuggingFace Dataset splits (train / val / test) consumed by grpo_trainer.py.
   csv_splits:
     type: uri_folder
     mode: rw_mount
-    description: CSV splits (train.csv / val.csv / test.csv) consumed by evaluator.py.

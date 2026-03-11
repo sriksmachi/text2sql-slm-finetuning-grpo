@@ -109,6 +109,12 @@ The aligned gains across both benchmarks validate the combined reward (`format +
 - Azure CLI + ML extension installed
 - Bicep CLI installed
 
+Install the Azure ML CLI extension before running the scripts in `azure/create_env.ps1` or `azure/build_image.ps1`:
+
+```bash
+az extension add --name ml
+```
+
 ### Deploy infrastructure
 
 ```bash

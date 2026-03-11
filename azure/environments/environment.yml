@@ -13,19 +13,20 @@
 $schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
 
 name: text2sql-grpo-env
-version: "1"
+version: "3"
 description: >
   GPU environment for Text-to-SQL GRPO fine-tuning.
-  Based on CUDA 12.1 + cuDNN 8 with PyTorch 2.4, Unsloth, vLLM, and TRL.
+  Based on CUDA 11.8 + cuDNN 8 with PyTorch 2.4, Unsloth, vLLM, and TRL.
 
-# Azure ML curated base image with CUDA 12.1 and OpenMPI
+# Azure ML base image with CUDA 11.8 and OpenMPI.
+# Use an immutable tag to avoid rebuilds caused by a moving :latest tag.
 # (pre-installed: CUDA runtime, cuDNN, NCCL, OpenMPI)
-image: mcr.microsoft.com/azureml/openmpi4.1.0-cuda12.1-cudnn8-ubuntu22.04:latest
+image: mcr.microsoft.com/azureml/openmpi4.1.0-cuda11.8-cudnn8-ubuntu22.04:20250828.v1
 
 conda_file: conda_env.yml
 
 tags:
   framework: unsloth
-  cuda: "12.1"
+  cuda: "11.8"
   python: "3.11"
   task: text2sql-grpo

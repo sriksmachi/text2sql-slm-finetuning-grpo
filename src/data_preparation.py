@@ -42,9 +42,9 @@ From Python::
 From the command line::
 
     python src/data_preparation.py \\
-        --rawdata-dir /kaggle/working/rawdata \\
-        --serialized-dir /kaggle/working/serialized_schemas \\
-        --splits-dir /kaggle/working/splits \\
+        --rawdata-dir /data/rawdata \\
+        --serialized-dir /data/serialized_schemas \\
+        --splits-dir /data/splits \\
         --sample-size 400 \\
         --train-ratio 0.7 \\
         --val-ratio 0.15 \\
@@ -847,17 +847,17 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--rawdata-dir",
-        default="/kaggle/working/rawdata",
+        default="/data/rawdata",
         help="Root directory for raw downloaded data.",
     )
     p.add_argument(
         "--serialized-dir",
-        default="/kaggle/working/serialized_schemas",
+        default="/data/serialized_schemas",
         help="Directory to write/read schema_lookup.json.",
     )
     p.add_argument(
         "--splits-dir",
-        default="/kaggle/working/splits",
+        default="/data/splits",
         help="Directory to write train/val/test CSV files.",
     )
     p.add_argument(
@@ -875,7 +875,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--val-ratio",
         type=float,
-        default=0.15,
+        default=0.3,
         help="Fraction of sampled db_ids for the validation split.",
     )
     p.add_argument(
