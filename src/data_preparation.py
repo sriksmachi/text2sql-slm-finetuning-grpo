@@ -64,7 +64,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import requests
-from datasets import Dataset
 from loguru import logger
 from tqdm import tqdm
 
@@ -357,12 +356,15 @@ def load_schemas(serialized_dir: str) -> pd.DataFrame:
 
     if isinstance(data, list):
         # list-of-objects: [{"db_id": …, "schema": …}, …]
-        return pd.DataFrame(data)
+        schemas_df = pd.DataFrame(data)
     else:
         # plain dict: {"db_id": schema_dict, …}
-        return pd.DataFrame(
+        schemas_df = pd.DataFrame(
             [{"db_id": k, "schema": v} for k, v in data.items()]
         )
+
+    logger.info(f"Number of schemas: {len(schemas_df)}")
+    return schemas_df
 
 
 # ---------------------------------------------------------------------------
@@ -404,11 +406,13 @@ def load_spider_examples(rawdata_dir: str) -> pd.DataFrame:
     df["question"] = df["question"].apply(_ensure_question)
 
     n_dupes = df.duplicated().sum()
+    logger.info(f"Duplicates check: {n_dupes}")
     if n_dupes:
         logger.info(f"Dropping {n_dupes} duplicate Spider rows.")
         df.drop_duplicates(inplace=True)
 
     df.reset_index(drop=True, inplace=True)
+    logger.info(f"Length of samples: {df.count().to_dict()}")
     logger.info(f"Spider examples loaded: {len(df)} rows.")
     return df
 
@@ -460,7 +464,15 @@ def load_bird_examples(rawdata_dir: str) -> pd.DataFrame:
         df.rename(columns={"query": "SQL"}, inplace=True)
 
     df["question"] = df["question"].apply(_ensure_question)
+
+    n_dupes = df.duplicated().sum()
+    logger.info(f"Duplicates check: {n_dupes}")
+    if n_dupes:
+        logger.info(f"Dropping {n_dupes} duplicate BIRD rows.")
+        df.drop_duplicates(inplace=True)
+
     df.reset_index(drop=True, inplace=True)
+    logger.info(f"Length of samples: {df.count().to_dict()}")
     logger.info(f"BIRD examples loaded: {len(df)} rows.")
     return df
 
@@ -491,12 +503,19 @@ def merge_examples_with_schemas(
     -------
     Merged DataFrame with all columns from both inputs.
     """
+    logger.info(
+        "Merging examples with schemas: examples_rows=%s, schema_rows=%s, example_db_ids=%s, schema_db_ids=%s",
+        len(examples_ds),
+        len(schemas_ds),
+        examples_ds["db_id"].nunique(),
+        schemas_ds["db_id"].nunique(),
+    )
     merged = pd.merge(schemas_ds, examples_ds, on="db_id", how="inner")
     n_null = merged.isnull().any(axis=1).sum()
     if n_null:
-        logger.warning(f"{n_null} rows with nulls after merge; dropping.")
-        merged.dropna(inplace=True)
+        raise ValueError(f"{n_null} rows with nulls after merge.")
     merged.reset_index(drop=True, inplace=True)
+    logger.info(f"Total Examples: {len(merged)}")
     logger.info(f"Merged dataset: {len(merged)} rows.")
     return merged
 
@@ -534,7 +553,7 @@ def stratified_split(
         DataFrame with at least ``db_id`` and ``source`` columns.
     sample_size:
         Total number of *database IDs* to sample before splitting (not rows).
-        Defaults to 400.
+        Use ``-1`` to include all available database IDs. Defaults to 400.
     train_ratio:
         Fraction of sampled db_ids to put in train. Defaults to 0.70.
     val_ratio:
@@ -547,28 +566,51 @@ def stratified_split(
     -------
     Tuple of three DataFrames: ``(train_ds, val_ds, test_ds)``.
     """
+    # number of sources (e.g. "spider", "bird") → list of db_ids belonging to each source
+    logger.info("Performing stratified split by source…")
+    logger.info(f"Total unique db_ids before sampling: {merged_samples['db_id'].nunique()}")
+    # Shape of data after this step, Example: {'spider': 20, 'bird': 30}
     db_source_map = (
         merged_samples.drop_duplicates("db_id")
         .set_index("db_id")["source"]
     )
+    # Source groups: {'spider': [db_id1, db_id2, ...], 'bird': [db_idA, db_idB, ...]}
     source_groups: dict[str, list[str]] = {
         src: grp.index.tolist()
         for src, grp in db_source_map.groupby(db_source_map)
     }
     n_sources = len(source_groups)
-    n_per_source = max(1, sample_size // n_sources)
+    logger.info(
+        f"Split plan: sample_size={sample_size}, train_ratio={train_ratio}, "
+        f"val_ratio={val_ratio}, test_ratio={1 - train_ratio - val_ratio:.2f}, seed={seed}"
+    )
+    logger.info(
+        f"Available db_ids by source: "
+        f"{ {src: len(ids) for src, ids in source_groups.items()} }"
+    )
+    effective_sample_size = merged_samples["db_id"].nunique() if sample_size == -1 else sample_size
+    logger.debug(
+        f"Sampling {effective_sample_size} db_ids stratified by source ({n_sources} sources)…"
+    )
+    per_source = effective_sample_size // n_sources
+    remainder = effective_sample_size % n_sources
 
     rng = np.random.default_rng(seed=seed)
     train_dbs: list[str] = []
     val_dbs:   list[str] = []
     test_dbs:  list[str] = []
 
-    for src in sorted(source_groups):
+    for idx, src in enumerate(sorted(source_groups)):
         ids = source_groups[src]
-        chosen = rng.choice(ids, size=min(n_per_source, len(ids)), replace=False).tolist()
+        n_to_sample = per_source + (1 if idx < remainder else 0)
+        chosen = rng.choice(ids, size=min(n_to_sample, len(ids)), replace=False).tolist()
         n = len(chosen)
         n_train = max(1, int(n * train_ratio))
         n_val   = max(1, min(int(n * val_ratio), n - n_train))
+        logger.info(
+            f"Source '{src}': available_db_ids={len(ids)}, sampled_db_ids={len(chosen)}, "
+            f"train_db_ids={n_train}, val_db_ids={n_val}, test_db_ids={n - n_train - n_val}"
+        )
 
         train_dbs.extend(chosen[:n_train])
         val_dbs.extend(chosen[n_train : n_train + n_val])
@@ -577,6 +619,20 @@ def stratified_split(
     train_ds = merged_samples[merged_samples["db_id"].isin(train_dbs)].copy()
     val_ds   = merged_samples[merged_samples["db_id"].isin(val_dbs)].copy()
     test_ds  = merged_samples[merged_samples["db_id"].isin(test_dbs)].copy()
+
+    logger.info(
+        f"DBs in each set: Train, Val, Test: {(len(train_dbs), len(val_dbs), len(test_dbs))}"
+    )
+    logger.info(
+        f"Rows in each set: Train, Val, Test: {(len(train_ds), len(val_ds), len(test_ds))}"
+    )
+
+    logger.info("Train DS Value Counts")
+    logger.info(f"{train_ds['source'].value_counts().to_dict()}")
+    logger.info("Val DS Value Counts")
+    logger.info(f"{val_ds['source'].value_counts().to_dict()}")
+    logger.info("Test DS Value Counts")
+    logger.info(f"{test_ds['source'].value_counts().to_dict()}")
 
     for name, ds in (("train", train_ds), ("val", val_ds), ("test", test_ds)):
         logger.info(
@@ -618,6 +674,10 @@ def build_prompt_datasets(
     Tuple of three lists: ``(train_dataset, val_dataset, test_dataset)``.
     """
     def _apply(df: pd.DataFrame) -> list[dict[str, Any]]:
+        logger.info(
+            f"Building prompt records for {len(df)} rows across {df['db_id'].nunique()} db_ids "
+            f"({df['source'].value_counts().to_dict()})"
+        )
         return df.apply(
             lambda row: make_prompt_record(
                 question=row["question"],
@@ -683,45 +743,6 @@ def save_splits(
     logger.success(f"All splits saved to {out}")
 
 
-def save_hf_splits(
-    train_ds: pd.DataFrame,
-    val_ds: pd.DataFrame,
-    test_ds: pd.DataFrame,
-    output_dir: str,
-) -> None:
-    """Save raw split DataFrames as HuggingFace ``datasets`` to disk.
-
-    The saved datasets contain the raw columns used by :mod:`grpo_trainer`:
-    ``question``, ``SQL``, ``schema``, ``source``, ``db_id``.  The trainer
-    applies prompt-building itself via ``_to_record``.
-
-    The ``schema`` column is serialised as a JSON string so that Arrow can
-    store variable-length dict structures without type inference issues.
-    :mod:`grpo_trainer` parses it back to a dict before calling
-    ``make_prompt_record``.
-
-    Parameters
-    ----------
-    train_ds, val_ds, test_ds:
-        Raw split DataFrames from :func:`stratified_split`.
-    output_dir:
-        Where to write ``train/``, ``val/``, ``test/`` subdirectories.
-    """
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    keep_cols = ["question", "SQL", "schema", "source", "db_id"]
-    for name, df in (("train", train_ds), ("val", val_ds), ("test", test_ds)):
-        subset = df[keep_cols].reset_index(drop=True).copy()
-        # Serialise dicts to JSON strings; grpo_trainer parses them back.
-        subset["schema"] = subset["schema"].apply(json.dumps)
-        ds = Dataset.from_pandas(subset, preserve_index=False)
-        ds.save_to_disk(str(out / name))
-        logger.info(f"HF dataset saved → {out / name} ({len(ds)} rows)")
-
-    logger.success(f"HF splits saved to {out}")
-
-
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -737,7 +758,6 @@ def prepare(
     seed: int = 42,
     skip_download: bool = False,
     skip_serialize: bool = False,
-    hf_splits_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Run the full data preparation pipeline.
 
@@ -763,6 +783,7 @@ def prepare(
         Directory to write ``train.csv``, ``val.csv``, ``test.csv``.
     sample_size:
         Total number of database IDs to sample before splitting.
+        Use ``-1`` to include all available database IDs.
     train_ratio:
         Fraction of sampled db_ids assigned to train.
     val_ratio:
@@ -777,11 +798,6 @@ def prepare(
         If True, assume ``schema_lookup.json`` already exists in
         *serialized_dir* and skip schema serialisation.  Useful to avoid
         re-reading hundreds of SQLite files on every run.
-    hf_splits_dir:
-        If provided, also save raw HuggingFace datasets under this directory
-        (``train/``, ``val/``, ``test/`` sub-dirs).  Required for Azure ML
-        pipeline jobs where ``grpo_trainer.py`` reads via ``load_from_disk``.
-
     Returns
     -------
     Tuple ``(train_dataset, val_dataset, test_dataset)`` – lists of
@@ -790,7 +806,7 @@ def prepare(
     # --- Step 1+2: Download (optional) ---
     if not skip_download:
         download_datasets(rawdata_dir)
-        extract_bird_databases(rawdata_dir)
+    extract_bird_databases(rawdata_dir)
 
     # --- Step 3: Serialize schemas (optional) ---
     if not skip_serialize:
@@ -802,7 +818,13 @@ def prepare(
     # --- Step 5: Load examples ---
     spider_ds = load_spider_examples(rawdata_dir)
     bird_ds   = load_bird_examples(rawdata_dir)
+    logger.info(
+        f"Loaded source datasets: spider_rows={len(spider_ds)}, bird_rows={len(bird_ds)}, "
+        f"spider_db_ids={spider_ds['db_id'].nunique()}, bird_db_ids={bird_ds['db_id'].nunique()}"
+    )
     examples_ds = pd.concat([spider_ds, bird_ds], axis=0, ignore_index=True)
+    logger.info(f"Total Examples: {len(examples_ds)}")
+    logger.info(f"Examples by Source: {examples_ds['source'].value_counts().to_dict()}")
     logger.info(
         f"Total examples: {len(examples_ds)} "
         f"({examples_ds['source'].value_counts().to_dict()})"
@@ -827,10 +849,6 @@ def prepare(
 
     # --- Step 9: Save CSV (for evaluator / human inspection) ---
     save_splits(train_dataset, val_dataset, test_dataset, splits_dir)
-
-    # --- Step 9b: Save HF datasets (for grpo_trainer) ---
-    if hf_splits_dir is not None:
-        save_hf_splits(train_ds, val_ds, test_ds, hf_splits_dir)
 
     return train_dataset, val_dataset, test_dataset
 
@@ -864,7 +882,7 @@ def _parse_args() -> argparse.Namespace:
         "--sample-size",
         type=int,
         default=400,
-        help="Total number of database IDs to sample before splitting.",
+        help="Total number of database IDs to sample before splitting; use -1 to include all databases.",
     )
     p.add_argument(
         "--train-ratio",
@@ -894,11 +912,6 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip schema serialization (assumes schema_lookup.json already exists).",
     )
-    p.add_argument(
-        "--hf-splits-dir",
-        default=None,
-        help="If set, also save raw HuggingFace datasets here (for grpo_trainer).",
-    )
     return p.parse_args()
 
 
@@ -914,5 +927,4 @@ if __name__ == "__main__":
         seed=args.seed,
         skip_download=args.skip_download,
         skip_serialize=args.skip_serialize,
-        hf_splits_dir=args.hf_splits_dir,
     )

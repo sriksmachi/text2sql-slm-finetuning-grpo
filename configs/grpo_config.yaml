@@ -3,16 +3,19 @@
 
 model:
   name_or_path: "unsloth/Qwen2.5-3B-Instruct"
-  torch_dtype: "bfloat16"
+  torch_dtype: "float16"
   load_in_4bit: true
   use_gradient_checkpointing: "unsloth"
   lora_rank: 32
+  fast_inference: auto
+  gpu_memory_utilization: 0.9
+  random_state: 3407
 
 grpo:
   # Number of rollout samples per prompt
-  num_generations: 2
+  num_generations: 3
   # Max tokens to generate during rollout
-  max_new_tokens: 512
+  max_completion_length: 512
   # Temperature for sampling
   temperature: 0.7
   # KL penalty coefficient
@@ -23,9 +26,12 @@ grpo:
   num_iterations: 1
   # Use DAPO loss (clip-higher variant)
   use_dapo: false
-
+  # Use Ablation mode (for testing with smaller datasets and faster iterations)
+  ablation: true
+  
 tokenizer:
-  max_length: 2048
+  max_length: 1024
+  truncation_side: "left"
   padding_side: "left"
 
 reward:

@@ -28,7 +28,7 @@
 
 .PARAMETER GpuCluster
     Name of the GPU compute cluster used for training and evaluation.
-    Defaults to: gpu-cluster
+    Defaults to: gpu-cluster-2
 
 .PARAMETER SampleSize
     Number of Q/SQL pairs to sample (0 = all). Default: 400
@@ -63,9 +63,9 @@ param (
     [string] $Job = "data_prep",
 
     [string] $CpuCluster  = "cpu-cluster",
-    [string] $GpuCluster  = "gpu-cluster",
+    [string] $GpuCluster  = "gpu-cluster-2",
 
-    [int]    $SampleSize  = 400,
+    [int]    $SampleSize  = 6,
 
     [switch] $Stream
 
@@ -146,6 +146,8 @@ Assert-EnvironmentExists
 # ─────────────────────────────────────────────────────────────────────────────
 if ($Mode -eq "pipeline") {
     Write-Host "`n=== Submitting full pipeline ===" -ForegroundColor Magenta
+    # Log input args for visibility; the actual submission command is in Submit-Job
+    Write-Host "► az ml job create --file $PipelineYaml --set inputs.sample_size=$SampleSize jobs.data_prep.compute=azureml:$CpuCluster jobs.train.compute=azureml:$GpuCluster jobs.eval.compute=azureml:$GpuCluster" -ForegroundColor Cyan
     Submit-Job -YamlFile $PipelineYaml -SetArgs @(
         "--set", "inputs.sample_size=$SampleSize",
         "--set", "jobs.data_prep.compute=azureml:$CpuCluster",

@@ -2,7 +2,7 @@ $schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
 
 type: command
 display_name: text2sql-data-preparation
-description: Download Spider/BIRD datasets, serialize schemas, and produce train/val/test splits in both HuggingFace and CSV formats.
+description: Download Spider/BIRD datasets, serialize schemas, and produce train/val/test CSV prompt-record splits.
 experiment_name: text2sql-grpo
 
 code: ../../  # repo root – entire workspace is uploaded; scripts live in src/
@@ -16,14 +16,13 @@ command: >-
   --rawdata-dir ${{outputs.rawdata_dir}}
   --serialized-dir ${{outputs.serialized_schemas}}
   --splits-dir ${{outputs.csv_splits}}
-  --hf-splits-dir ${{outputs.hf_splits}}
   --sample-size ${{inputs.sample_size}}
   --train-ratio ${{inputs.train_ratio}}
   --val-ratio ${{inputs.val_ratio}}
   --seed ${{inputs.seed}}
 
 inputs:
-  sample_size: 400
+  sample_size: 6
   train_ratio: 0.7
   val_ratio: 0.15
   seed: 42
@@ -33,9 +32,6 @@ outputs:
     type: uri_folder
     mode: rw_mount
   serialized_schemas:
-    type: uri_folder
-    mode: rw_mount
-  hf_splits:
     type: uri_folder
     mode: rw_mount
   csv_splits:

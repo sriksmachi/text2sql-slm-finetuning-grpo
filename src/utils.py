@@ -18,11 +18,66 @@ normalise_sql           Parse → re-serialise SQL for consistent comparison.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 import sqlglot
+from loguru import logger
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+
+class _InterceptHandler(logging.Handler):
+    """Route stdlib logging records through loguru."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = str(record.levelno)
+        frame, depth = sys._getframe(6), 6
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back  # type: ignore[assignment]
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+
+def setup_logging(level: str = "INFO") -> None:
+    """Configure loguru and intercept stdlib logging at *level*.
+
+    Removes loguru's default handler and adds a fresh stderr sink at the
+    requested level.  Also installs an :class:`_InterceptHandler` so that
+    Transformers / TRL / vLLM log records (which use the stdlib ``logging``
+    module) are routed through loguru at the same verbosity.
+
+    Parameters
+    ----------
+    level:
+        Any loguru-recognised level string: ``DEBUG``, ``INFO``, ``WARNING``,
+        ``ERROR``, ``CRITICAL``.  Case-insensitive.
+    """
+    level = level.upper()
+    logger.remove()
+    logger.add(sys.stderr, level=level, colorize=False,
+                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}")
+    logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    # Always suppress chatty third-party loggers regardless of level
+    for noisy in (
+        "urllib3",
+        "urllib3.connectionpool",
+        "filelock",
+        "fsspec",
+        "huggingface_hub",
+        "azureml.mlflow",
+        "azureml.mlflow._common._authentication",
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 # ---------------------------------------------------------------------------
 # SQL extraction
@@ -195,6 +250,115 @@ def parse_schema_string(schema_str: str) -> dict[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# GPU / runtime resolution helpers (shared between trainer and evaluator)
+# ---------------------------------------------------------------------------
+
+
+def get_gpu_runtime_profile() -> dict[str, Any]:
+    """Return the current CUDA device profile used for runtime decisions."""
+    import torch
+
+    profile: dict[str, Any] = {
+        "cuda_available": torch.cuda.is_available(),
+        "device_name": None,
+        "compute_capability": None,
+        "major": None,
+        "minor": None,
+    }
+    if not profile["cuda_available"]:
+        return profile
+
+    major, minor = torch.cuda.get_device_capability()
+    profile.update(
+        {
+            "device_name": torch.cuda.get_device_name(0),
+            "compute_capability": f"{major}.{minor}",
+            "major": major,
+            "minor": minor,
+        }
+    )
+    return profile
+
+
+def resolve_model_dtype(
+    dtype_name: str | None,
+    gpu_profile: dict[str, Any],
+) -> str | None:
+    """Resolve the configured model dtype for the active GPU.
+
+    Falls back from bfloat16 to float16 on pre-Ampere GPUs (compute capability < 8).
+    """
+    if dtype_name is None:
+        return None
+
+    normalized = str(dtype_name).strip().lower()
+    if normalized in {"", "auto", "none"}:
+        return None
+
+    if normalized == "bfloat16" and gpu_profile.get("major") is not None:
+        if int(gpu_profile["major"]) < 8:
+            logger.warning(
+                "Configured dtype bfloat16 is not supported on GPU compute capability "
+                "{}; falling back to float16.",
+                gpu_profile["compute_capability"],
+            )
+            return "float16"
+
+    return normalized
+
+
+def resolve_fast_inference(
+    requested: Any,
+    gpu_profile: dict[str, Any],
+) -> bool:
+    """Decide whether to enable Unsloth fast inference on the current GPU.
+
+    Parameters
+    ----------
+    requested:
+        Value from ``model.fast_inference`` in grpo_config.yaml.
+        Accepts ``True``/``False`` (bool), or the strings
+        ``"true"``, ``"false"``, or ``"auto"``.
+        ``"auto"`` enables fast inference only on Ampere+ (compute capability >= 8).
+    gpu_profile:
+        Dict returned by :func:`get_gpu_runtime_profile`.
+    """
+    major = gpu_profile.get("major")
+
+    if isinstance(requested, str):
+        normalized = requested.strip().lower()
+        if normalized == "auto":
+            enabled = bool(major is not None and int(major) >= 8)
+            logger.info(
+                "Resolved fast_inference={} for GPU compute capability {}.",
+                enabled,
+                gpu_profile.get("compute_capability"),
+            )
+            return enabled
+        if normalized in {"true", "1", "yes", "on"}:
+            requested_bool = True
+        elif normalized in {"false", "0", "no", "off"}:
+            requested_bool = False
+        else:
+            raise ValueError(
+                "model.fast_inference must be one of true/false/auto. "
+                f"Received: {requested!r}."
+            )
+    else:
+        requested_bool = bool(requested)
+
+    if requested_bool and major is not None and int(major) < 8:
+        logger.warning(
+            "Disabling fast_inference: GPU compute capability {} does not support "
+            "the vLLM LoRA Triton path used by Unsloth on this runtime.",
+            gpu_profile.get("compute_capability"),
+        )
+        return False
+
+    return requested_bool
+
+
+# ---------------------------------------------------------------------------
 # SQL normalisation
 # ---------------------------------------------------------------------------
 
@@ -211,31 +375,16 @@ def normalise_sql(sql: str, dialect: str = "sqlite") -> str:
 
 
 def configure_mlflow_tracking(
-    tracking_uri: str | None,
     experiment_name: str,
 ) -> tuple[bool, str | None]:
-    """Configure MLflow tracking and return whether remote logging is enabled.
+    """Configure MLflow tracking and return whether logging is enabled.
 
-    Azure ML tracking URIs require the ``azureml-mlflow`` plugin. If the
-    plugin isn't available, tracking is disabled instead of failing the job.
+    When running inside an Azure ML job the tracking URI is automatically
+    injected by the platform, so no explicit URI is required.
     """
     import mlflow
 
-    if not tracking_uri:
-        mlflow.set_experiment(experiment_name)
-        return True, None
-
-    if tracking_uri.startswith("azureml://"):
-        try:
-            import azureml.mlflow  # type: ignore  # noqa: F401
-        except ImportError:
-            return False, (
-                "MLflow tracking URI uses the azureml:// scheme, but the "
-                "azureml-mlflow plugin is not installed."
-            )
-
     try:
-        mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(experiment_name)
     except Exception as exc:
         return False, f"Failed to configure MLflow tracking: {exc}"

@@ -17,8 +17,8 @@ Usage (CLI)
         --config configs/grpo_config.yaml \\
         --training-args configs/training_args.yaml \\
         --reward-weights configs/reward_weights.yaml \\
-        --train-data data/splits/train \\
-        --val-data data/splits/val \\
+        --train-data data/splits/train.csv \
+        --val-data data/splits/val.csv \
         --output-dir outputs/checkpoint \\
         --mlflow-tracking-uri azureml://...
 
@@ -26,9 +26,11 @@ Config keys used from grpo_config.yaml
 ---------------------------------------
 model.name_or_path            HuggingFace model id or local path
 model.load_in_4bit            Whether to load in 4-bit (bool)
+model.fast_inference          true/false/auto for Unsloth vLLM path
 model.lora_rank               LoRA rank r (also used for lora_alpha)
 model.use_gradient_checkpointing  "unsloth" or True/False
 grpo.num_generations          Rollouts per prompt
+grpo.max_completion_length    Max generated tokens per rollout
 grpo.temperature              Sampling temperature
 grpo.beta                     KL penalty coefficient
 grpo.epsilon                  Policy-ratio clip range
@@ -39,29 +41,42 @@ tokenizer.max_length          Max sequence length
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.metadata
 import json as _json
 import os
 from contextlib import nullcontext
+from numbers import Number
 from pathlib import Path
 from typing import Any
 
 import mlflow
+import pandas as pd
 import yaml
-from datasets import load_from_disk
 from loguru import logger
 
+# Import unsloth before transformers to apply all kernel optimisations.
+try:
+    import unsloth as _unsloth  # noqa: F401
+except ImportError:
+    pass
+
 from rewards import combined_reward
-from utils import configure_mlflow_tracking, make_prompt_record
+from utils import (
+    configure_mlflow_tracking,
+    get_gpu_runtime_profile,
+    make_prompt_record,
+    resolve_fast_inference,
+    resolve_model_dtype,
+    setup_logging,
+)
+from transformers import TrainerCallback
 
 
 def _force_disable_flashinfer_sampler() -> None:
     """Force-disable FlashInfer sampler before Unsloth/vLLM import."""
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
     os.putenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
-
-
-_force_disable_flashinfer_sampler()
 
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
@@ -151,6 +166,61 @@ def _log_runtime_versions() -> None:
 
     logger.info(f"Resolved runtime versions: {versions}")
 
+def _load_prompt_records(path: str | Path) -> list[dict[str, Any]]:
+    """Load notebook-style prompt records from a CSV split."""
+    records_df = pd.read_csv(path)
+    required_columns = {"prompt", "solution", "schema", "source", "db_id"}
+    missing_columns = required_columns.difference(records_df.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Dataset at {path} is missing required columns: {sorted(missing_columns)}"
+        )
+
+    records: list[dict[str, Any]] = []
+    for row in records_df.to_dict(orient="records"):
+        prompt = row["prompt"]
+        schema = row["schema"]
+
+        if isinstance(prompt, str):
+            prompt = ast.literal_eval(prompt)
+        if isinstance(schema, str):
+            schema = ast.literal_eval(schema)
+
+        records.append(
+            {
+                "prompt": prompt,
+                "solution": row["solution"],
+                "schema": schema,
+                "source": row["source"],
+                "db_id": row["db_id"],
+            }
+        )
+
+    return records
+
+class MLflowLoggingCallback(TrainerCallback):
+    """Log trainer metrics to the active MLflow run."""
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not self.enabled or not logs:
+            return control
+
+        metrics: dict[str, float] = {}
+        logger.debug(f"Trainer logs at step {state.global_step}: {logs}")
+        for key, value in logs.items():
+            if isinstance(value, bool):
+                metrics[key] = float(value)
+            elif isinstance(value, Number):
+                metrics[key] = float(value)
+
+        if not metrics:
+            return control
+
+        mlflow.log_metrics(metrics, step=state.global_step)
+        return control
 
 def train(
     grpo_config_path: str,
@@ -159,7 +229,6 @@ def train(
     train_data_dir: str,
     val_data_dir: str,
     output_dir: str,
-    mlflow_tracking_uri: str | None = None,
 ) -> None:
     """Run the GRPO fine-tuning loop.
 
@@ -172,14 +241,11 @@ def train(
     reward_weights_path:
         Path to ``configs/reward_weights.yaml``.
     train_data_dir:
-        Directory containing the training split (HuggingFace ``datasets``
-        format or CSV; must have columns question/SQL/schema/source/db_id).
+        CSV file containing the training split prompt records.
     val_data_dir:
-        Directory containing the validation split.
+        CSV file containing the validation split prompt records.
     output_dir:
         Directory where the LoRA adapter will be saved.
-    mlflow_tracking_uri:
-        Optional MLflow tracking URI (e.g. an Azure ML workspace URI).
     """
     # ── Load configs ───────────────────────────────────────
     grpo_cfg = _load_yaml(grpo_config_path)
@@ -201,7 +267,6 @@ def train(
 
     # ── MLflow ─────────────────────────────────────────────
     mlflow_enabled, mlflow_message = configure_mlflow_tracking(
-        mlflow_tracking_uri,
         train_cfg.get("run_name", "text2sql-grpo"),
     )
     if not mlflow_enabled and mlflow_message:
@@ -215,14 +280,33 @@ def train(
         _configure_vllm_runtime()
         from unsloth import FastLanguageModel  # type: ignore
 
+        gpu_profile = get_gpu_runtime_profile()
+        model_dtype = resolve_model_dtype(
+            grpo_cfg["model"].get("torch_dtype"),
+            gpu_profile,
+        )
+        fast_inference = resolve_fast_inference(
+            grpo_cfg["model"].get("fast_inference", "auto"),
+            gpu_profile,
+        )
+
+        logger.info(
+            "Using Unsloth runtime settings: dtype={}, fast_inference={}, gpu={}.",
+            model_dtype or "default",
+            fast_inference,
+            gpu_profile.get("device_name") or "cpu",
+        )
+        logger.info(f"Loading model {grpo_cfg['model']['name_or_path']} with Unsloth...")
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=grpo_cfg["model"]["name_or_path"],
             max_seq_length=grpo_cfg["tokenizer"]["max_length"],
             load_in_4bit=grpo_cfg["model"].get("load_in_4bit", True),
-            # Match the working notebook path for GRPO rollouts.
-            fast_inference=True,
+            dtype=model_dtype,
+            fast_inference=fast_inference,
             max_lora_rank=lora_rank,
-            gpu_memory_utilization=0.9,
+            gpu_memory_utilization=grpo_cfg["model"].get(
+                "gpu_memory_utilization", 0.9
+            ),
         )
         # Attach a LoRA adapter.  Only QKVO projections are trained to stay
         # within GPU memory on a single T4 / A100-40 GB.
@@ -234,41 +318,34 @@ def train(
             use_gradient_checkpointing=grpo_cfg["model"].get(
                 "use_gradient_checkpointing", "unsloth"
             ),
-            random_state=3407,
+            random_state=grpo_cfg["model"].get("random_state", 42),
         )
     except ImportError:
         logger.warning("unsloth not installed – falling back to plain transformers.")
         raise RuntimeError("Unsloth is required for this training script.")
 
-    # ── Dataset ────────────────────────────────────────────
-    train_dataset = load_from_disk(train_data_dir)
-    val_dataset = load_from_disk(val_data_dir)
-
-    # Convert each row to a training record with a chat-format prompt.
-    # The record keys (prompt/solution/schema/source/db_id) are used by both
-    # GRPOTrainer (prompt) and the reward wrapper (schema/source/db_id).
-    def _to_record(examples: dict[str, list]) -> dict[str, list]:
-        raw_schemas = examples.get("schema", [{}] * len(examples["question"]))
-        records = [
-            make_prompt_record(
-                question=examples["question"][i],
-                # Schema is stored as a JSON string in the HF dataset (to keep
-                # Arrow types uniform across databases with different structures).
-                # Parse it back to a dict if needed.
-                schema=_json.loads(raw_schemas[i])
-                    if isinstance(raw_schemas[i], str) else raw_schemas[i],
-                answer=examples["SQL"][i],
-                source=examples["source"][i],
-                db_id=examples["db_id"][i],
-            )
-            for i in range(len(examples["question"]))
-        ]
-        # Transpose list-of-dicts → dict-of-lists for HF datasets
-        return {k: [r[k] for r in records] for k in records[0]}
-
-    train_dataset = train_dataset.map(_to_record, batched=True)
-    val_dataset = val_dataset.map(_to_record, batched=True)
-
+    ablation = grpo_cfg["grpo"]["ablation"] 
+    # safely parse ablation to true or false
+    ablation = str(ablation).strip().lower() in {"true", "1", "yes", "on"}
+    train_dataset: list[dict[str, Any]] = []
+    val_dataset: list[dict[str, Any]] = []
+    logger.debug(f"Ablation config: {ablation}")
+    if ablation:
+        logger.warning(f"Ablation mode enabled: {ablation}. This will affect rewards.")
+        train_dataset = _load_prompt_records(train_data_dir)[:10]
+        val_dataset = _load_prompt_records(val_data_dir)[:5]
+        # override configuration
+        grpo_cfg["grpo"]["num_iterations"] = 1
+        train_cfg["num_train_epochs"] = 1
+        grpo_cfg["grpo"]["num_generations"] = 2 # > 1 needed for averaging in reward_fn, but keep small for speed
+        train_cfg["per_device_train_batch_size"] = 20
+        train_cfg["gradient_accumulation_steps"] = 1
+        train_cfg["logging_steps"] = 5
+    else:
+        logger.info(f"Running full experiment. Loading training data from {train_data_dir}...")
+        train_dataset = _load_prompt_records(train_data_dir)
+        val_dataset = _load_prompt_records(val_data_dir)
+    
     # ── Reward wrapper ─────────────────────────────────────
     # GRPOTrainer passes extra dataset columns as keyword arguments to the
     # reward function.  We forward schema, source, and db_id so that
@@ -297,7 +374,7 @@ def train(
         grpo_train_cfg = GRPOConfig(
             output_dir=output_dir,
             num_generations=grpo_cfg["grpo"]["num_generations"],
-            max_new_tokens=grpo_cfg["grpo"]["max_new_tokens"],
+            max_completion_length=grpo_cfg["grpo"]["max_completion_length"],
             temperature=grpo_cfg["grpo"]["temperature"],
             beta=grpo_cfg["grpo"]["beta"],
             epsilon=grpo_cfg["grpo"]["epsilon"],
@@ -309,7 +386,7 @@ def train(
             bf16=train_cfg.get("bf16", False),
             logging_steps=train_cfg.get("logging_steps", 10),
             save_steps=train_cfg.get("save_steps", 10),
-            report_to="none",
+            report_to=train_cfg.get("report_to", "none"),
         )
 
         trainer = GRPOTrainer(
@@ -320,6 +397,7 @@ def train(
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
         )
+        trainer.add_callback(MLflowLoggingCallback(enabled=mlflow_enabled))
     except ImportError as exc:
         raise RuntimeError("trl>=0.8.6 is required for GRPOTrainer.") from exc
 
@@ -334,19 +412,32 @@ def train(
                     "lora_rank": lora_rank,
                     "num_generations": grpo_cfg["grpo"]["num_generations"],
                     "beta": grpo_cfg["grpo"]["beta"],
+                    "epsilon": grpo_cfg["grpo"]["epsilon"],
+                    "reward_weights": reward_weights,
+                    "learning_rate": grpo_train_cfg.learning_rate,
+                    "per_device_train_batch_size": grpo_train_cfg.per_device_train_batch_size,
+                    "gradient_accumulation_steps": grpo_train_cfg.gradient_accumulation_steps,
+                    "num_train_epochs": grpo_train_cfg.num_train_epochs,
+                    "bf16": grpo_train_cfg.bf16,
+                    "model_dtype": model_dtype or "default",
+                        "fast_inference": fast_inference,
                 }
-            )
+                    )
         trainer.train()
-        # Save only the LoRA delta weights (much smaller than the full model)
-        model.save_lora(lora_save_path)
+        # Save only the LoRA delta weights.
+        # save_lora() is Unsloth-specific (fast_inference=True path).
+        # Fall back to PEFT's save_pretrained() which also saves adapter-only
+        # weights and works on both plain PEFT and Unsloth models.
+        if hasattr(model, "save_lora"):
+            model.save_lora(lora_save_path)
+        else:
+            trainer.model.save_pretrained(lora_save_path)
         tokenizer.save_pretrained(output_dir)
         logger.info(f"LoRA adapter saved to {lora_save_path}")
-
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="GRPO Text-to-SQL trainer")
@@ -356,12 +447,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--train-data", required=True, help="Training split directory")
     p.add_argument("--val-data", required=True, help="Validation split directory")
     p.add_argument("--output-dir", required=True, help="Directory for checkpoints")
-    p.add_argument("--mlflow-tracking-uri", default=None)
+    p.add_argument(
+        "--log-level",
+        default="DEBUG",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Loguru + stdlib logging verbosity (default: DEBUG)",
+    )
     return p.parse_args()
-
 
 if __name__ == "__main__":
     args = _parse_args()
+    setup_logging(args.log_level)
+    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
     train(
         grpo_config_path=args.config,
         training_args_path=args.training_args,
@@ -369,5 +466,4 @@ if __name__ == "__main__":
         train_data_dir=args.train_data,
         val_data_dir=args.val_data,
         output_dir=args.output_dir,
-        mlflow_tracking_uri=args.mlflow_tracking_uri,
     )

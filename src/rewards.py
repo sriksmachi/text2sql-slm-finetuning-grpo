@@ -55,6 +55,16 @@ _INLINE_SQL_RE = re.compile(r"(SELECT\s+.+?;)", re.DOTALL | re.IGNORECASE)
 SUPPORTED_DIALECTS = ("sqlite", "duckdb", "postgres", "mysql", "tsql", "bigquery")
 
 
+def _preview_text(text: str | None, limit: int = 240) -> str:
+    """Return a single-line preview for log messages."""
+    if text is None:
+        return ""
+    compact = " ".join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "..."
+
+
 def extract_sql(text: str) -> str | None:
     """Return the first SQL block found in *text*, or ``None``.
 
@@ -116,6 +126,9 @@ def format_reward(
         text = messages[-1]["content"] if messages else ""
         sql = extract_sql(text)
         if sql is None:
+            logger.debug(
+                f"[format_reward] [{idx}] completion_preview={_preview_text(text)!r}"
+            )
             logger.warning(f"[format_reward] [{idx}] No SQL block found → 0.0")
             rewards.append(0.0)
             continue
@@ -123,7 +136,16 @@ def format_reward(
             parsed = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.RAISE)
             score = 1.0 if parsed else 0.0
         except sqlglot.errors.ParseError as exc:
+            logger.debug(
+                f"[format_reward] [{idx}] sql_preview={_preview_text(sql)!r}"
+            )
             logger.warning(f"[format_reward] [{idx}] Parse error: {exc} → 0.0")
+            score = 0.0
+        except sqlglot.errors.TokenError as exc:
+            logger.debug(
+                f"[format_reward] [{idx}] sql_preview={_preview_text(sql)!r}"
+            )
+            logger.warning(f"[format_reward] [{idx}] Token error: {exc} → 0.0")
             score = 0.0
         rewards.append(score)
     return rewards
@@ -170,7 +192,7 @@ def _exec_on_sqlite(
     if source == "spider" and db_path:
         full_path = f"{base_path}/spider/spider_data/database/{db_path}/{db_path}.sqlite"
     elif source == "bird" and db_path:
-        full_path = f"{base_path}/bird/dev_20240627/dev_databases/{db_path}/{db_path}.sqlite"
+        full_path = f"{base_path}/bird/dev_databases/{db_path}/{db_path}.sqlite"
     else:
         logger.warning(
             f"[exec] Cannot resolve DB path for db_path={db_path!r}, source={source!r}"
@@ -241,7 +263,17 @@ def exec_reward(
             try:
                 sql = sqlglot.transpile(sql, read=dialect, write="sqlite")[0]
             except sqlglot.errors.ParseError as exc:
+                logger.debug(
+                    f"[exec_reward] [{idx}] sql_preview={_preview_text(sql)!r}"
+                )
                 logger.warning(f"[exec_reward] [{idx}] Transpile error: {exc} → 0.0")
+                rewards.append(0.0)
+                continue
+            except sqlglot.errors.TokenError as exc:
+                logger.debug(
+                    f"[exec_reward] [{idx}] sql_preview={_preview_text(sql)!r}"
+                )
+                logger.warning(f"[exec_reward] [{idx}] Token error during transpile: {exc} → 0.0")
                 rewards.append(0.0)
                 continue
 
@@ -273,7 +305,11 @@ def _extract_schema_items(sql: str) -> tuple[set[str], set[str]]:
                 if isinstance(node, sqlglot.exp.Column) and node.name:
                     columns.add(node.name.lower())
     except sqlglot.errors.ParseError as exc:
+        logger.debug(f"[schema] sql_preview={_preview_text(sql)!r}")
         logger.warning(f"[schema] Parse error while extracting items: {exc}")
+    except sqlglot.errors.TokenError as exc:
+        logger.debug(f"[schema] sql_preview={_preview_text(sql)!r}")
+        logger.warning(f"[schema] Token error while extracting items: {exc}")
     return tables, columns
 
 
