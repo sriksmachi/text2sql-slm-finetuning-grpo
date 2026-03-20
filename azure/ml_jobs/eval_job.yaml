@@ -33,11 +33,11 @@ inputs:
     mode: ro_mount
   csv_splits:
     type: uri_folder
-    path: azureml://subscriptions/6a01260f-39d6-415f-a6c9-cf4fd479cbec/resourcegroups/txt2sql-grpo-rg/workspaces/txt2sql-grpo-ws/datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/csv_splits/
+    path: azureml://datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/csv_splits/test
     mode: ro_mount
   rawdata_dir:
     type: uri_folder
-    path: azureml://subscriptions/6a01260f-39d6-415f-a6c9-cf4fd479cbec/resourcegroups/txt2sql-grpo-rg/workspaces/txt2sql-grpo-ws/datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/rawdata_dir/
+    path: azureml://datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/rawdata_dir/
     mode: ro_mount
   temperature: 0.0
   top_p: 1.0

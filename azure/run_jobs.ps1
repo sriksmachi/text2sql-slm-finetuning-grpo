@@ -147,11 +147,11 @@ Assert-EnvironmentExists
 if ($Mode -eq "pipeline") {
     Write-Host "`n=== Submitting full pipeline ===" -ForegroundColor Magenta
     # Log input args for visibility; the actual submission command is in Submit-Job
-    Write-Host "► az ml job create --file $PipelineYaml --set inputs.sample_size=$SampleSize jobs.data_prep.compute=azureml:$CpuCluster jobs.train.compute=azureml:$GpuCluster jobs.eval.compute=azureml:$GpuCluster" -ForegroundColor Cyan
+    Write-Host "► az ml job create --file $PipelineYaml --set inputs.sample_size=$SampleSize jobs.data_prep.compute=azureml:$CpuCluster jobs.grpo_train.compute=azureml:$GpuCluster jobs.eval.compute=azureml:$GpuCluster" -ForegroundColor Cyan
     Submit-Job -YamlFile $PipelineYaml -SetArgs @(
         "--set", "inputs.sample_size=$SampleSize",
         "--set", "jobs.data_prep.compute=azureml:$CpuCluster",
-        "--set", "jobs.train.compute=azureml:$GpuCluster",
+        "--set", "jobs.grpo_train.compute=azureml:$GpuCluster",
         "--set", "jobs.eval.compute=azureml:$GpuCluster"
     )
     Write-Host "`n✅ Pipeline submitted." -ForegroundColor Green

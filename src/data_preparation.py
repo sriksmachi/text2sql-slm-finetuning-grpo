@@ -893,7 +893,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--val-ratio",
         type=float,
-        default=0.3,
+        default=0.15,
         help="Fraction of sampled db_ids for the validation split.",
     )
     p.add_argument(
@@ -916,7 +916,8 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    args = _parse_args()
+    args = _parse_args() 
+    logger.info(f"Starting data preparation with args: {args}")
     prepare(
         rawdata_dir=args.rawdata_dir,
         serialized_dir=args.serialized_dir,

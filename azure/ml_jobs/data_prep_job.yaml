@@ -22,7 +22,7 @@ command: >-
   --seed ${{inputs.seed}}
 
 inputs:
-  sample_size: 6
+  sample_size: -1
   train_ratio: 0.7
   val_ratio: 0.15
   seed: 42
