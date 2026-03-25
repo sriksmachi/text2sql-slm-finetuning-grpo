@@ -127,13 +127,31 @@ def run_prompt(
         return model.fast_generate(text, **kwargs)[0].outputs[0].text
     else:
         tokens = tokenizer(text, return_tensors="pt")
-        outputs = model.fast_generate(
-            **tokens.to("cuda"),
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-        )
         input_len = tokens["input_ids"].shape[-1]
+        # PeftModel wraps the base Unsloth model; its __getattr__ delegates
+        # fast_generate to the base model, bypassing LoRA adapter layers.
+        # Use the standard HF .generate() path so LoRA weights are active.
+        try:
+            from peft import PeftModel as _PeftModel  # type: ignore
+            _is_peft = isinstance(model, _PeftModel)
+        except ImportError:
+            _is_peft = False
+        if _is_peft:
+            outputs = model.generate(
+                **tokens.to("cuda"),
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=temperature > 0,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        else:
+            outputs = model.fast_generate(
+                **tokens.to("cuda"),
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
         return tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
 
 
@@ -159,11 +177,13 @@ def compute_rewards(
     -------
     List of combined reward floats, one per row.
     """
-    # Wrap each completion string in the TRL message-list format expected
-    # by the reward functions.  SQL is enclosed in a code fence so
-    # ``extract_sql`` can locate it.
+    # Pass the model's raw output as the assistant message content.
+    # The model is already trained to emit ```sql ... ``` fences, so adding
+    # another outer fence would create a double-fenced string that causes
+    # extract_sql to capture an empty body, making exec/schema rewards
+    # always return their default "no SQL" values.
     completions = [
-        [{"role": "assistant", "content": f"```sql\n{row}\n```"}]
+        [{"role": "assistant", "content": row}]
         for row in dataset[completion_col]
     ]
     # ensure prompts, schemas, sources, and db_ids are all lists of the same length as completions
@@ -347,11 +367,16 @@ def evaluate(
                 # vLLM path: load_lora() returns a lora_request object used per-call.
                 lora_request = model.load_lora(lora_path)
             else:
-                # HF path: model is a plain HF model; load the PEFT adapter in-place.
+                # HF path: load the PEFT adapter WITHOUT merging.
+                # merge_and_unload() on a 4-bit quantised model causes rounding
+                # errors that corrupt generation (model outputs garbage).  Keep
+                # the PeftModel so LoRA weights stay as adapter layers; run_prompt
+                # detects PeftModel and calls .generate() which routes the forward
+                # pass through the LoRA layers correctly.
                 from peft import PeftModel  # type: ignore
 
                 model = PeftModel.from_pretrained(model, lora_path)
-                model = model.merge_and_unload()
+                model.eval()
                 lora_request = None
 
             finetuned_df = test_df.copy()

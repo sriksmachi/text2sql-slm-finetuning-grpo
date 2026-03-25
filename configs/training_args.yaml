@@ -6,17 +6,17 @@ run_name: "text2sql-grpo"
 # Batch sizes
 # Must satisfy: per_device_train_batch_size * gradient_accumulation_steps * world_size % num_generations == 0
 # Effective batch = 9 * 3 * 1 = 27; 27 % 9 (num_generations) = 0
-per_device_train_batch_size: 9
+per_device_train_batch_size: 8
 per_device_eval_batch_size: 3
-gradient_accumulation_steps: 3
+gradient_accumulation_steps: 4
 
 # Learning rate schedule
 learning_rate: 2.0e-5
 lr_scheduler_type: "cosine"
-warmup_ratio: 0.05
+warmup_ratio: 0.10
 
 # Training length
-num_train_epochs: 3
+num_train_epochs: 8
 max_steps: -1
 
 # Precision

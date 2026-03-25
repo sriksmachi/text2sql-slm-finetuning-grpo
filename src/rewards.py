@@ -85,6 +85,12 @@ def extract_sql(text: str) -> str | None:
         else:
             logger.debug(f"extract_sql: No SQL block found in text_preview={_preview_text(text)!r}")
             return None
+    # Guard: an empty capture means the fence regex matched but enclosed nothing
+    # (e.g. double-fenced output like ```sql\n```sql ... ```\n```).  Treat as
+    # "no SQL found" so execution/format rewards return the correct penalty.
+    if not sql:
+        logger.debug(f"extract_sql: Empty SQL captured from text_preview={_preview_text(text)!r}")
+        return None
     # 1) Normalize backslash-escaped quotes (\') -> SQL-standard doubled quote ('')
     sql = sql.replace("\\'", "''")
 
