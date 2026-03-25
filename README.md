@@ -264,4 +264,4 @@ black --check src/ tests/
 
 ## 📄 License
 
-MIT © 2024 [sriksmachi](https://github.com/sriksmachi)
+MIT [sriksmachi](https://github.com/sriksmachi)

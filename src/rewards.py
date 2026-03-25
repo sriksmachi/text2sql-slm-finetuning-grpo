@@ -31,7 +31,7 @@ Database path resolution
 SQLite files:
 
     spider  →  <base_path>/spider/spider_data/database/<db_id>/<db_id>.sqlite
-    bird    →  <base_path>/bird/dev_20240627/dev_databases/<db_id>/<db_id>.sqlite
+    bird    →  <base_path>/bird/dev_databases/<db_id>/<db_id>.sqlite
 """
 
 from __future__ import annotations
@@ -50,7 +50,11 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 
 _SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-_INLINE_SQL_RE = re.compile(r"(SELECT\s+.+?;)", re.DOTALL | re.IGNORECASE)
+# Matches bare SELECT … without requiring a trailing semicolon.
+# Uses a lazy quantifier that stops at an explicit ";", a blank line, or
+# end-of-string so multiline SQL is captured whole but trailing explanation
+# text after a paragraph break is excluded.
+_INLINE_SQL_RE = re.compile(r"(SELECT\b.+?)(?:;|\n\n|\Z)", re.DOTALL | re.IGNORECASE)
 
 SUPPORTED_DIALECTS = ("sqlite", "duckdb", "postgres", "mysql", "tsql", "bigquery")
 
@@ -79,6 +83,7 @@ def extract_sql(text: str) -> str | None:
         if m:
             sql = m.group(1).strip()
         else:
+            logger.debug(f"extract_sql: No SQL block found in text_preview={_preview_text(text)!r}")
             return None
     # 1) Normalize backslash-escaped quotes (\') -> SQL-standard doubled quote ('')
     sql = sql.replace("\\'", "''")
@@ -98,6 +103,33 @@ def extract_sql(text: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# sql_format_strict_reward
+# ---------------------------------------------------------------------------
+
+
+def sql_format_strict_reward(
+    completions: list[list[dict[str, str]]],
+    **kwargs: Any,
+) -> list[float]:
+    """Score each completion on whether it uses a fenced ```sql``` block.
+
+    Unlike ``format_reward`` which accepts bare ``SELECT …`` statements,
+    this reward only gives 1.0 when the model wraps its SQL in a proper
+    ```sql … ``` fence.  This directly reinforces the expected output
+    format and penalises prose or Python answers.
+
+    Returns
+    -------
+    List of floats (one per completion), each in {0.0, 1.0}.
+    """
+    rewards: list[float] = []
+    for messages in completions:
+        text = messages[-1]["content"] if messages else ""
+        rewards.append(1.0 if _SQL_FENCE_RE.search(text) else 0.0)
+    return rewards
+
+
+# ---------------------------------------------------------------------------
 # format_reward
 # ---------------------------------------------------------------------------
 
@@ -108,8 +140,9 @@ def format_reward(
 ) -> list[float]:
     """Score each completion on SQL format validity.
 
-    A completion scores 1.0 when it contains a fenced SQL block that
-    sqlglot can parse without errors, and 0.0 otherwise.
+    A completion scores 1.0 when it contains either a fenced ```sql```
+    block or a bare ``SELECT …`` statement that sqlglot can parse without
+    errors, and 0.0 otherwise.
 
     Parameters
     ----------
@@ -215,6 +248,7 @@ def exec_reward(
     dialect: str = "sqlite",
     db_paths: list[str | None] | None = None,
     source: list[str | None] | None = None,
+    no_sql_penalty: float = -1.0,
     **kwargs: Any,
 ) -> list[float]:
     """Score each completion by executing its SQL against the target database.
@@ -255,8 +289,8 @@ def exec_reward(
         text = messages[-1]["content"] if messages else ""
         sql = extract_sql(text)
         if sql is None:
-            logger.warning(f"[exec_reward] [{idx}] No SQL found → -1.0")
-            rewards.append(-1.0)
+            logger.warning(f"[exec_reward] [{idx}] No SQL found → {no_sql_penalty}")
+            rewards.append(no_sql_penalty)
             continue
 
         if dialect != "sqlite":
@@ -316,6 +350,7 @@ def _extract_schema_items(sql: str) -> tuple[set[str], set[str]]:
 def schema_fidelity_reward(
     completions: list[list[dict[str, str]]],
     schemas: list[dict[str, list[str]]] | None = None,
+    unknown_schema_item_penalty: float = 0.0,
     **kwargs: Any,
 ) -> list[float]:
     """Score each completion on how faithfully it references the provided schema.
@@ -370,7 +405,11 @@ def schema_fidelity_reward(
             continue
 
         valid_refs = (ref_tables & tables_in_schema) | (ref_columns & columns_in_schema)
-        rewards.append(len(valid_refs) / len(all_refs))
+        valid_frac = len(valid_refs) / len(all_refs)
+        # Apply penalty proportional to the fraction of invalid references.
+        # With penalty=0.0 (default) this is identical to the original formula.
+        score = valid_frac + unknown_schema_item_penalty * (1.0 - valid_frac)
+        rewards.append(score)
 
     return rewards
 
@@ -390,6 +429,15 @@ def combined_reward(
     weights: dict[str, float] | None = None,
     **kwargs: Any,
 ) -> list[float]:
+    """Weighted combination of format, exec, and schema_fidelity rewards.
+
+    Default weights (must sum to 1.0):
+        format=0.2 · exec=0.5 · schema_fidelity=0.3
+
+    Supports an optional ``no_sql_penalty`` key in *weights* (default -1.0)
+    forwarded to ``exec_reward`` to control the penalty for completions that
+    contain no SQL at all.
+    """
     """Weighted combination of format, exec, and schema_fidelity rewards.
 
     Default weights (must sum to 1.0):
@@ -416,8 +464,9 @@ def combined_reward(
     -------
     List of floats (one per completion), rounded to 4 decimal places.
     """
-    w = weights or {"format": 0.2, "exec": 0.5, "schema_fidelity": 0.3}
-
+    w = weights or {"format": 0.15, "exec": 0.5, "schema_fidelity": 0.25, "sql_fence": 0.1}
+    no_sql_penalty: float = w.get("no_sql_penalty", -2.0)  # type: ignore[assignment]
+    unknown_schema_item_penalty: float = w.get("unknown_schema_item_penalty", 0.0)  # type: ignore[assignment]
     fmt = format_reward(completions)
     exc = exec_reward(
         completions,
@@ -425,10 +474,29 @@ def combined_reward(
         dialect=dialect,
         db_paths=db_paths,
         source=source,
+        no_sql_penalty=no_sql_penalty,
     )
-    sfr = schema_fidelity_reward(completions, schemas=schemas)
+    sfr = schema_fidelity_reward(
+        completions,
+        schemas=schemas,
+        unknown_schema_item_penalty=unknown_schema_item_penalty,
+    )
+    fence = sql_format_strict_reward(completions)
 
+    logger.debug(f"[combined_reward]============================================")
+    logger.debug(f"[combined_reward] completions={len(completions)} items")
+    logger.debug(f"[combined_reward] completions_preview={[ _preview_text(messages[-1]['content']) for messages in completions ]}")
+    logger.debug(f"[combined_reward] fmt={fmt}")
+    logger.debug(f"[combined_reward] exc={exc}")
+    logger.debug(f"[combined_reward] sfr={sfr}")
+    logger.debug(f"[combined_reward] fence={fence}")
     return [
-        round(w["format"] * f + w["exec"] * e + w["schema_fidelity"] * s, 4)
-        for f, e, s in zip(fmt, exc, sfr)
+        round(
+            w["format"] * f
+            + w["exec"] * e
+            + w["schema_fidelity"] * s
+            + w.get("sql_fence", 0.0) * fn,
+            4,
+        )
+        for f, e, s, fn in zip(fmt, exc, sfr, fence)
     ]

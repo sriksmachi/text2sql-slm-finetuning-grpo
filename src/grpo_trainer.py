@@ -180,12 +180,10 @@ def _load_prompt_records(path: str | Path) -> list[dict[str, Any]]:
     for row in records_df.to_dict(orient="records"):
         prompt = row["prompt"]
         schema = row["schema"]
-
         if isinstance(prompt, str):
             prompt = ast.literal_eval(prompt)
         if isinstance(schema, str):
             schema = ast.literal_eval(schema)
-
         records.append(
             {
                 "prompt": prompt,
@@ -256,9 +254,12 @@ def train(
 
     # Map YAML keys to the weight dict expected by combined_reward
     reward_weights = {
-        "format": reward_cfg.get("format_reward", 0.2),
+        "format": reward_cfg.get("format_reward", 0.15),
         "exec": reward_cfg.get("exec_reward", 0.5),
-        "schema_fidelity": reward_cfg.get("schema_fidelity_reward", 0.3),
+        "schema_fidelity": reward_cfg.get("schema_fidelity_reward", 0.25),
+        "sql_fence": reward_cfg.get("sql_fence_reward", 0.1),
+        "no_sql_penalty": reward_cfg.get("no_sql_penalty", -2.0),
+        "unknown_schema_item_penalty": reward_cfg.get("unknown_schema_item_penalty", 0.0),
     }
 
     lora_rank: int = grpo_cfg["model"]["lora_rank"]
@@ -344,6 +345,7 @@ def train(
     else:
         logger.info(f"Running full experiment. Loading training data from {train_data_dir}...")
         train_dataset = _load_prompt_records(train_data_dir)
+        logger.info(f"Sample: {train_dataset[0]}")
         val_dataset = _load_prompt_records(val_data_dir)
     
     # ── Reward wrapper ─────────────────────────────────────
@@ -382,10 +384,18 @@ def train(
             per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", 3),
             gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 6),
             learning_rate=train_cfg.get("learning_rate", 2e-5),
-            num_train_epochs=train_cfg.get("num_train_epochs", 2),
+            lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
+            warmup_ratio=train_cfg.get("warmup_ratio", 0.05),
+            weight_decay=train_cfg.get("weight_decay", 0.0),
+            max_grad_norm=train_cfg.get("max_grad_norm", 1.0),
+            num_train_epochs=train_cfg.get("num_train_epochs", 3),
             bf16=train_cfg.get("bf16", False),
-            logging_steps=train_cfg.get("logging_steps", 10),
-            save_steps=train_cfg.get("save_steps", 10),
+            fp16=train_cfg.get("fp16", False),
+            logging_steps=train_cfg.get("logging_steps", 5),
+            save_steps=train_cfg.get("save_steps", 25),
+            save_total_limit=train_cfg.get("save_total_limit", 10),
+            eval_steps=train_cfg.get("eval_steps", 25),
+            seed=train_cfg.get("seed", 42),
             report_to=train_cfg.get("report_to", "none"),
         )
 
@@ -403,7 +413,7 @@ def train(
 
     # ── Run ────────────────────────────────────────────────
     lora_save_path = str(Path(output_dir) / "grpo_saved_lora")
-    run_context = mlflow.start_run() if mlflow_enabled else nullcontext()
+    run_context = mlflow.start_run(run_id=os.environ.get("MLFLOW_RUN_ID")) if mlflow_enabled else nullcontext()
     with run_context:
         if mlflow_enabled:
             mlflow.log_params(

@@ -36,7 +36,9 @@ Usage (CLI)
 from __future__ import annotations
 
 import argparse
+import ast
 import json
+import os
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -76,29 +78,34 @@ def run_prompt(
     prompt: list[dict[str, str]],
     model: Any,
     tokenizer: Any,
-    sampling_params: Any,
+    temperature: float,
+    top_p: float,
+    max_new_tokens: int,
+    fast_inference: bool,
     lora_request: Any | None = None,
 ) -> str:
     """Generate a SQL completion for a single chat-format prompt.
 
-    Uses Unsloth's ``model.fast_generate`` (vLLM-backed) for efficient
-    batched inference.  Pass ``lora_request`` to enable a LoRA adapter;
-    omit it (or pass ``None``) for zero-shot baseline inference.
+    Supports both vLLM (``fast_inference=True``) and HuggingFace
+    (``fast_inference=False``) backends.  Pass ``lora_request`` for the vLLM
+    path to activate a LoRA adapter; for the HF path the adapter must already
+    be loaded into the model weights.
 
     Parameters
     ----------
     prompt:
-        Chat-format prompt as a list of ``{"role": …, "content": …}`` dicts
-        (the ``"prompt"`` field from a training record).
+        Chat-format prompt as a list of ``{"role": …, "content": …}`` dicts.
     model:
-        Unsloth ``FastLanguageModel`` instance (with ``fast_inference=True``).
+        Unsloth ``FastLanguageModel`` instance.
     tokenizer:
         Corresponding tokenizer.
-    sampling_params:
-        vLLM ``SamplingParams`` instance (temperature, top_p, max_tokens).
+    temperature / top_p / max_new_tokens:
+        Sampling parameters.
+    fast_inference:
+        ``True`` → vLLM backend (``SamplingParams``);  ``False`` → HF backend.
     lora_request:
-        If provided, the LoRA adapter is activated during generation.
-        Obtain via ``model.load_lora(lora_path)``.
+        vLLM-only: LoRA adapter request from ``model.load_lora()``.  Ignored
+        when ``fast_inference=False``.
 
     Returns
     -------
@@ -107,12 +114,27 @@ def run_prompt(
     text = tokenizer.apply_chat_template(
         prompt, tokenize=False, add_generation_prompt=True
     )
-    kwargs: dict[str, Any] = {"sampling_params": sampling_params}
-    if lora_request is not None:
-        kwargs["lora_request"] = lora_request
 
-    output = model.fast_generate(text, **kwargs)[0].outputs[0].text
-    return output
+    if fast_inference:
+        from vllm import SamplingParams  # type: ignore
+
+        sampling_params = SamplingParams(
+            temperature=temperature, top_p=top_p, max_tokens=max_new_tokens
+        )
+        kwargs: dict[str, Any] = {"sampling_params": sampling_params}
+        if lora_request is not None:
+            kwargs["lora_request"] = lora_request
+        return model.fast_generate(text, **kwargs)[0].outputs[0].text
+    else:
+        tokens = tokenizer(text, return_tensors="pt")
+        outputs = model.fast_generate(
+            **tokens.to("cuda"),
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        input_len = tokens["input_ids"].shape[-1]
+        return tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
 
 
 def compute_rewards(
@@ -144,6 +166,7 @@ def compute_rewards(
         [{"role": "assistant", "content": f"```sql\n{row}\n```"}]
         for row in dataset[completion_col]
     ]
+    # ensure prompts, schemas, sources, and db_ids are all lists of the same length as completions
     return combined_reward(
         completions,
         prompts=dataset["prompt"].tolist(),
@@ -161,7 +184,7 @@ def compute_rewards(
 def evaluate(
     grpo_config_path: str,
     test_data_path: str,
-    output_dir: str,
+    eval_results: str,
     lora_path: str | None = None,
     temperature: float = 0.7,
     top_p: float = 0.95,
@@ -176,7 +199,7 @@ def evaluate(
     3. If ``lora_path`` is provided, re-run inference with the LoRA adapter
        loaded (fine-tuned evaluation).
     4. Score both passes with ``combined_reward``.
-    5. Save per-row CSVs and aggregate metrics JSON to ``output_dir``.
+    5. Save per-row CSVs and aggregate metrics JSON to ``eval_results``.
     6. Log metrics to MLflow.
 
     Parameters
@@ -186,7 +209,7 @@ def evaluate(
         ``model.name_or_path`` in this file.
     test_data_path:
         Path to the test CSV produced by the data-prep notebook.
-    output_dir:
+    eval_results:
         Directory for saving results.
     lora_path:
         Path to the saved LoRA adapter (``grpo_saved_lora/``).
@@ -200,17 +223,16 @@ def evaluate(
     per source, and overall averages).
     """
     from tqdm.auto import tqdm
-    from vllm import SamplingParams  # type: ignore
 
     logger.debug(
         "evaluate() called with: grpo_config_path={}, "
-        "test_data_path={}, output_dir={}, lora_path={}, "
+        "test_data_path={}, eval_results={}, lora_path={}, "
         "temperature={}, top_p={}, max_tokens={}",
-        grpo_config_path, test_data_path, output_dir,
+        grpo_config_path, test_data_path, eval_results,
         lora_path, temperature, top_p, max_tokens,
     )
 
-    output_path = Path(output_dir)
+    output_path = Path(eval_results)
     output_path.mkdir(parents=True, exist_ok=True)
     grpo_cfg = _load_yaml(grpo_config_path)
     max_seq_length = grpo_cfg["tokenizer"]["max_length"]
@@ -228,6 +250,7 @@ def evaluate(
 
     # ── Load model (Unsloth) ───────────────────────────────
     gpu_profile = get_gpu_runtime_profile()
+    logger.info("GPU runtime profile: {}", gpu_profile)
     fast_inference = resolve_fast_inference(
         grpo_cfg["model"].get("fast_inference", "auto"),
         gpu_profile,
@@ -259,18 +282,22 @@ def evaluate(
             "Unsloth is required for evaluation. Install with `pip install unsloth`."
         )
 
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
-    )
-    logger.debug("SamplingParams: temperature={}, top_p={}, max_tokens={}",
-                 temperature, top_p, max_tokens)
+    logger.debug("Generation params: fast_inference={}, temperature={}, top_p={}, max_tokens={}",
+                 fast_inference, temperature, top_p, max_tokens)
 
     # ── Load test data ─────────────────────────────────────
     test_df = pd.read_csv(test_data_path)
+    
+    # prompt was serialized as a Python list of dicts by build_prompt(); read_csv
+    # loads it back as a plain string — deserialize it so apply_chat_template works.
+    test_df["prompt"] = test_df["prompt"].apply(ast.literal_eval)
+    test_df["schema"] = test_df["schema"].apply(ast.literal_eval)
+    test_df["db_id"] = test_df["db_id"].astype(str)  # ensure db_id is string for reward routing
+    test_df["source"] = test_df["source"].astype(str)  # ensure source is string for grouping
+    
     logger.info("Test set loaded: {} rows, columns={}", len(test_df), list(test_df.columns))
     logger.debug("Test set source distribution:\n{}", test_df["source"].value_counts().to_string())
+    
     tqdm.pandas(desc="Generating SQL")
 
     metrics: dict[str, float] = {}
@@ -278,7 +305,7 @@ def evaluate(
     logger.debug("lora_path={} — {} evaluation pass(es) will run.",
                  lora_path, "2" if lora_path else "1 (baseline only)")
 
-    run_context = mlflow.start_run() if mlflow_enabled else nullcontext()
+    run_context = mlflow.start_run(run_id=os.environ.get("MLFLOW_RUN_ID")) if mlflow_enabled else nullcontext()
     with run_context:
         if mlflow_enabled:
             import mlflow as _mlflow
@@ -295,7 +322,7 @@ def evaluate(
         logger.info("Running baseline inference (no LoRA)…")
         baseline_df = test_df.copy()
         baseline_df["completion"] = baseline_df["prompt"].progress_apply(
-            lambda p: run_prompt(p, model, tokenizer, sampling_params, lora_request=None)
+            lambda p: run_prompt(p, model, tokenizer, temperature, top_p, max_tokens, fast_inference, lora_request=None)
         )
         logger.debug("Baseline inference complete. Scoring {} rows…", len(baseline_df))
         baseline_df["reward"] = compute_rewards(baseline_df)
@@ -316,11 +343,20 @@ def evaluate(
         # ── Fine-tuned (with LoRA) ─────────────────────────
         if lora_path is not None:
             logger.info(f"Running fine-tuned inference with LoRA from {lora_path}…")
-            lora_request = model.load_lora(lora_path)
+            if fast_inference:
+                # vLLM path: load_lora() returns a lora_request object used per-call.
+                lora_request = model.load_lora(lora_path)
+            else:
+                # HF path: model is a plain HF model; load the PEFT adapter in-place.
+                from peft import PeftModel  # type: ignore
+
+                model = PeftModel.from_pretrained(model, lora_path)
+                model = model.merge_and_unload()
+                lora_request = None
 
             finetuned_df = test_df.copy()
             finetuned_df["completion"] = finetuned_df["prompt"].progress_apply(
-                lambda p: run_prompt(p, model, tokenizer, sampling_params, lora_request)
+                lambda p: run_prompt(p, model, tokenizer, temperature, top_p, max_tokens, fast_inference, lora_request)
             )
             logger.debug("Fine-tuned inference complete. Scoring {} rows…", len(finetuned_df))
             finetuned_df["reward"] = compute_rewards(finetuned_df)
@@ -341,14 +377,10 @@ def evaluate(
         # ── Log & save metrics ──────────────────────────────
         if mlflow_enabled:
             mlflow.log_metrics(metrics)
-        metrics_json = output_path / "metrics.json"
-        with open(metrics_json, "w") as fh:
-            json.dump(metrics, fh, indent=2)
-        if mlflow_enabled:
-            mlflow.log_artifact(str(metrics_json))
+
         logger.debug("Final metrics: {}", metrics)
 
-    logger.info("Evaluation complete. Results written to {}.", output_dir)
+    logger.info("Evaluation complete. Results written to {}.", eval_results)
     return metrics
 
 
@@ -360,7 +392,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Text-to-SQL evaluator (baseline + fine-tuned)")
     p.add_argument("--config", required=True, help="Path to grpo_config.yaml")
     p.add_argument("--test-data", required=True, help="Path to test CSV")
-    p.add_argument("--output-dir", required=True, help="Directory for results")
+    p.add_argument("--eval-results", required=True, help="Directory for results")
     p.add_argument(
         "--lora-path",
         default=None,
@@ -381,10 +413,11 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
     setup_logging(args.log_level)
+    logger.info("Starting evaluation with args: {}", args)
     evaluate(
         grpo_config_path=args.config,
         test_data_path=args.test_data,
-        output_dir=args.output_dir,
+        eval_results=args.eval_results,
         lora_path=args.lora_path,
         temperature=args.temperature,
         top_p=args.top_p,

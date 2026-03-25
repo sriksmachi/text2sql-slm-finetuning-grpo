@@ -9,18 +9,14 @@ code: ../../
 
 environment: azureml:text2sql-grpo-env@latest
 
-compute: azureml:gpu-cluster-2  # Standard_NC24ads_A100_v4 – vLLM inference requires GPU
-
-# exec_reward inside the evaluator needs access to the SQLite databases.
-environment_variables:
-  TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+compute: azureml:gpu-cluster-2  # Standard_NC12s_v3 – vLLM inference requires GPU
 
 command: >-
   python src/evaluator.py
   --config configs/grpo_config.yaml
   --lora-path ${{inputs.model_dir}}/grpo_saved_lora
-  --test-data ${{inputs.csv_splits}}/test.csv
-  --output-dir ${{outputs.eval_results}}
+  --test-data ${{inputs.test_data}}
+  --eval-results ${{outputs.eval_results}}
   --temperature ${{inputs.temperature}}
   --top-p ${{inputs.top_p}}
   --max-tokens ${{inputs.max_tokens}}
@@ -29,17 +25,17 @@ command: >-
 inputs:
   model_dir:
     type: uri_folder
-    path: azureml://subscriptions/6a01260f-39d6-415f-a6c9-cf4fd479cbec/resourcegroups/txt2sql-grpo-rg/workspaces/txt2sql-grpo-ws/datastores/workspaceblobstore/paths/azureml/serene_skin_dbq0xnkshw/model_dir/
+    path: "" # set at runtime from grpo_train outputs
     mode: ro_mount
-  csv_splits:
-    type: uri_folder
-    path: azureml://datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/csv_splits/test
+  test_data:
+    type: uri_file
+    path: "" # set at runtime from data_prep outputs
     mode: ro_mount
   rawdata_dir:
     type: uri_folder
-    path: azureml://datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/rawdata_dir/
+    path: "" # set at runtime from data_prep outputs
     mode: ro_mount
-  temperature: 0.0
+  temperature: 0.7
   top_p: 1.0
   max_tokens: 512
 

@@ -65,7 +65,7 @@ param (
     [string] $CpuCluster  = "cpu-cluster",
     [string] $GpuCluster  = "gpu-cluster-2",
 
-    [int]    $SampleSize  = 6,
+    [int]    $SampleSize = 8, # -1 means "use default from YAML" (which is 400)
 
     [switch] $Stream
 

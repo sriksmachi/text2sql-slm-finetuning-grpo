@@ -12,13 +12,13 @@ experiment_name: text2sql-grpo
 # ---------------------------------------------------------------------------
 inputs:
   # Data preparation
-  sample_size: 400
+  sample_size: -1
   train_ratio: 0.7
   val_ratio: 0.15
   seed: 42
 
   # Evaluation
-  temperature: 0.0
+  temperature: 0.7
   top_p: 1.0
   max_tokens: 512
 
@@ -73,7 +73,7 @@ jobs:
     environment: azureml:text2sql-grpo-env@latest
     compute: azureml:gpu-cluster-2
     environment_variables:
-      TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+      VLLM_USE_FLASHINFER_SAMPLER: "0"
     command: >-
       python src/grpo_trainer.py
       --config configs/grpo_config.yaml
@@ -97,14 +97,13 @@ jobs:
     code: ../../
     environment: azureml:text2sql-grpo-env@latest
     compute: azureml:gpu-cluster-2
-    environment_variables:
-      TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
+    environment_variables: {}
     command: >-
       python src/evaluator.py
       --config configs/grpo_config.yaml
       --lora-path ${{inputs.model_dir}}/grpo_saved_lora
       --test-data ${{inputs.csv_splits}}/test.csv
-      --output-dir ${{outputs.eval_results}}
+      --eval-results ${{outputs.eval_results}}
       --temperature ${{inputs.temperature}}
       --top-p ${{inputs.top_p}}
       --max-tokens ${{inputs.max_tokens}}

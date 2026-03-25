@@ -3,13 +3,17 @@
 # format_reward        : SQL syntax validity (sqlglot parse succeeds)
 # exec_reward          : Query executes without error on target DB
 # schema_fidelity_reward: All referenced tables/columns exist in the schema
+# sql_fence_reward     : Strictly requires a ```sql``` fenced block (no bare SELECT)
 
-format_reward: 0.2
+format_reward: 0.15
 exec_reward: 0.5
-schema_fidelity_reward: 0.3
+schema_fidelity_reward: 0.25
+sql_fence_reward: 0.1
 
 # Penalty applied when model output contains no SQL block at all
-no_sql_penalty: -1.0
+# Increased to -2.0 to more strongly discourage prose/Python/non-SQL outputs
+no_sql_penalty: -2.0
 
 # Penalty for SQL that parses but references unknown schema items
-unknown_schema_item_penalty: -0.5
+# Must be >= 0.0 to keep schema_fidelity_reward in [0, 1]
+unknown_schema_item_penalty: 0.0

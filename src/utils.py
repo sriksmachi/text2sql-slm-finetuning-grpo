@@ -107,9 +107,14 @@ def extract_sql_from_text(text: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
-    "You are an expert SQL assistant. Given a database schema and a natural language "
-    "question, write a correct SQL query that answers the question.\n"
-    "Return ONLY the SQL query inside a ```sql ... ``` code block."
+    "You are a SQL query generator. Your sole task is to convert a natural language question "
+    "into a single SQL query using the provided database schema.\n\n"
+    "STRICT RULES:\n"
+    "- Output ONLY a SQL query wrapped in a ```sql ... ``` code block.\n"
+    "- Do NOT write any explanation, description, prose, Python, or markdown outside the code block.\n"
+    "- Do NOT answer the question in plain text.\n"
+    "- Do NOT include multiple queries.\n"
+    "- Your entire response must be a single ```sql ... ``` block and nothing else."
 )
 
 
@@ -148,11 +153,9 @@ def build_prompt(
     """
     parts: list[str] = []
     parts.append(f"### Question\n{question}")
-
     if schema is not None:
         schema_str = schema if isinstance(schema, str) else str(schema)
         parts.append(f"### Schema\n{schema_str}")
-
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": "\n".join(parts)},
@@ -380,12 +383,21 @@ def configure_mlflow_tracking(
     """Configure MLflow tracking and return whether logging is enabled.
 
     When running inside an Azure ML job the tracking URI is automatically
-    injected by the platform, so no explicit URI is required.
+    injected by the platform, so no explicit URI is required.  Azure ML also
+    pre-creates a run and injects ``MLFLOW_RUN_ID`` into the environment; in
+    that case we skip ``set_experiment`` to avoid an experiment-ID mismatch
+    when ``start_run(run_id=...)`` resumes the pre-created run.
     """
+    import os
     import mlflow
 
     try:
-        mlflow.set_experiment(experiment_name)
+        # Azure ML pre-creates the run and exports MLFLOW_RUN_ID.  Calling
+        # set_experiment() with a *different* name would change the active
+        # experiment while the run still belongs to the original one, causing
+        # "active experiment ID does not match environment run ID".  Skip it.
+        if not os.environ.get("MLFLOW_RUN_ID"):
+            mlflow.set_experiment(experiment_name)
     except Exception as exc:
         return False, f"Failed to configure MLflow tracking: {exc}"
 

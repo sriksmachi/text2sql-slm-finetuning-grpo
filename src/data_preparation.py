@@ -79,6 +79,11 @@ SPIDER_URL = (
 )
 BIRD_URL = "https://bird-bench.oss-cn-beijing.aliyuncs.com/dev.zip"
 
+# Databases excluded from training due to contamination / reward signal issues.
+# european_football_2 elicits pandas/sklearn completions, producing zero-variance
+# reward groups that waste GRPO gradient steps.
+EXCLUDED_DB_IDS: frozenset[str] = frozenset({"european_football_2"})
+
 # ---------------------------------------------------------------------------
 # Step 1 – Download datasets
 # ---------------------------------------------------------------------------
@@ -527,7 +532,7 @@ def merge_examples_with_schemas(
 
 def stratified_split(
     merged_samples: pd.DataFrame,
-    sample_size: int = 400,
+    sample_size: int = 31, # total number of db_ids in sample data; use -1 to include all available db_ids
     train_ratio: float = 0.7,
     val_ratio: float = 0.15,
     seed: int = 42,
@@ -588,6 +593,7 @@ def stratified_split(
         f"Available db_ids by source: "
         f"{ {src: len(ids) for src, ids in source_groups.items()} }"
     )
+    # Set sample_size to the total number of unique db_ids if -1 is specified, ensuring we don't sample more than available
     effective_sample_size = merged_samples["db_id"].nunique() if sample_size == -1 else sample_size
     logger.debug(
         f"Sampling {effective_sample_size} db_ids stratified by source ({n_sources} sources)…"
@@ -605,16 +611,16 @@ def stratified_split(
         n_to_sample = per_source + (1 if idx < remainder else 0)
         chosen = rng.choice(ids, size=min(n_to_sample, len(ids)), replace=False).tolist()
         n = len(chosen)
-        n_train = max(1, int(n * train_ratio))
-        n_val   = max(1, min(int(n * val_ratio), n - n_train))
+        n_train = max(1, int(n * train_ratio)) 
+        n_val = max(1, int(n * val_ratio))
         logger.info(
             f"Source '{src}': available_db_ids={len(ids)}, sampled_db_ids={len(chosen)}, "
             f"train_db_ids={n_train}, val_db_ids={n_val}, test_db_ids={n - n_train - n_val}"
         )
 
-        train_dbs.extend(chosen[:n_train])
-        val_dbs.extend(chosen[n_train : n_train + n_val])
-        test_dbs.extend(chosen[n_train + n_val :])
+        train_dbs.extend(chosen[:n_train]) # if n = 31, n_train = 21, chosen[:n_train] = chosen[:21] → first 21 db_ids for train
+        val_dbs.extend(chosen[n_train : n_train + n_val]) # if n = 31, n_train = 21, n_val = 4, chosen[n_train : n_train + n_val] = chosen[21 : 25] → next 4 db_ids for val
+        test_dbs.extend(chosen[n_train + n_val :]) # if n = 31, n_train = 21, n_val = 4, chosen[n_train + n_val :] = chosen[25 :] → remaining db_ids for test
 
     train_ds = merged_samples[merged_samples["db_id"].isin(train_dbs)].copy()
     val_ds   = merged_samples[merged_samples["db_id"].isin(val_dbs)].copy()
@@ -832,6 +838,15 @@ def prepare(
 
     # --- Step 6: Merge ---
     merged = merge_examples_with_schemas(schemas_ds, examples_ds)
+
+    # --- Step 6b: Exclude contaminated databases ---
+    if EXCLUDED_DB_IDS:
+        before = len(merged)
+        merged = merged[~merged["db_id"].isin(EXCLUDED_DB_IDS)].reset_index(drop=True)
+        logger.info(
+            f"Excluded db_ids {sorted(EXCLUDED_DB_IDS)}: dropped {before - len(merged)} rows "
+            f"({before} → {len(merged)})"
+        )
 
     # --- Step 7: Split ---
     train_ds, val_ds, test_ds = stratified_split(

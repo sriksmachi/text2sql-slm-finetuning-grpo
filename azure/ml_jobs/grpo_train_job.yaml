@@ -11,10 +11,7 @@ environment: azureml:text2sql-grpo-env@latest
 
 compute: azureml:gpu-cluster-2  # Standard_NC24ads_A100_v4 (1 × A100 40 GB)
 
-# The rawdata_dir is bind-mounted and its path exposed via TEXT2SQL_RAWDATA_DIR
-# so that exec_reward can locate the SQLite databases at runtime.
 environment_variables:
-  TEXT2SQL_RAWDATA_DIR: ${{inputs.rawdata_dir}}
   VLLM_USE_FLASHINFER_SAMPLER: "0"
 
 command: >-
@@ -30,11 +27,11 @@ command: >-
 inputs:
   csv_splits:
     type: uri_folder
-    path: azureml://datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/csv_splits/
+    path: "" # set at runtime from data_prep outputs
     mode: ro_mount
   rawdata_dir:
     type: uri_folder
-    path: azureml://datastores/workspaceblobstore/paths/azureml/polite_roti_k9sfyg4c7z/rawdata_dir/
+    path: "" # set at runtime from data_prep outputs
     mode: ro_mount
 
 outputs:

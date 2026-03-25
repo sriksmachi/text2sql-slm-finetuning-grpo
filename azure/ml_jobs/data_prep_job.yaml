@@ -22,7 +22,7 @@ command: >-
   --seed ${{inputs.seed}}
 
 inputs:
-  sample_size: -1
+  sample_size: -1 # -1 means "use all available data"; min = 8. Default is 400, which is a good balance for development and testing. For final runs, consider using -1 to leverage the full dataset.
   train_ratio: 0.7
   val_ratio: 0.15
   seed: 42
