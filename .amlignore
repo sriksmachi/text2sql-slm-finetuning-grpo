@@ -1,0 +1,43 @@
+# Data files — large CSVs and SQLite DBs are mounted at runtime
+data/
+
+# Notebooks — not needed during training
+notebooks/
+
+# Test infrastructure
+test_fastinf/
+tests/
+
+# Azure ML scripts and IaC (not needed inside the training container)
+azure/
+
+# Documentation and assets
+docs/
+
+# Version control
+.git/
+
+# IDE / Copilot / agent tooling
+.copilot/
+.squad/
+.vscode/
+
+# Compiled / cache artefacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.ipynb_checkpoints/
+
+# Local environment and secrets
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Outputs produced by jobs (written inside output_dir, not the repo)
+outputs/

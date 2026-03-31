@@ -342,6 +342,10 @@ def train(
             gpu_profile.get("device_name") or "cpu",
         )
         logger.info(f"Loading model {grpo_cfg['model']['name_or_path']} with Unsloth...")
+        
+        # log the final resolved model dtype and fast inference settings
+        logger.info(f"Resolved model dtype: {model_dtype}, fast_inference: {fast_inference}")
+        
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=grpo_cfg["model"]["name_or_path"],
             max_seq_length=grpo_cfg["tokenizer"]["max_length"],
