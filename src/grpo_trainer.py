@@ -1,3 +1,4 @@
+
 """
 grpo_trainer.py – Unsloth + TRL GRPOTrainer wrapper for Text-to-SQL.
 
@@ -37,14 +38,27 @@ grpo.epsilon                  Policy-ratio clip range
 grpo.num_iterations           PPO update steps per batch
 tokenizer.max_length          Max sequence length
 """
-
 from __future__ import annotations
+import os
+
+# === STRONGER DISABLE FOR vLLM v1 + FULL CUDA GRAPH (critical for your error) ===
+os.environ["VLLM_USE_V1"] = "0"                          # Primary: force old vLLM engine
+os.environ["VLLM_ENFORCE_EAGER"] = "1"                   # ← NEW: Disable all CUDA graphs entirely (most reliable workaround)
+os.environ["UNSLOTH_VLLM_DISABLE_FULL_CUDAGRAPH"] = "1"
+os.environ["UNSLOTH_VLLM_STANDBY"] = "0"
+os.environ["VLLM_FLASH_ATTN"] = "0"
+os.environ["VLLM_USE_FLASHINFER"] = "0"
+os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+
+# Extra safety to reduce graph-related compilation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["VLLM_CUDAGRAPH_MODE"] = "0"
+
 
 import argparse
 import ast
 import importlib.metadata
 import json as _json
-import os
 from contextlib import nullcontext
 from numbers import Number
 from pathlib import Path
@@ -336,7 +350,7 @@ def train(
             fast_inference=fast_inference,
             max_lora_rank=lora_rank,
             gpu_memory_utilization=grpo_cfg["model"].get(
-                "gpu_memory_utilization", 0.9
+                "gpu_memory_utilization", 0.6
             )
         )
         # Attach a LoRA adapter.  Only QKVO projections are trained to stay
@@ -508,8 +522,8 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
     setup_logging(args.log_level)
-    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-    os.environ["UNSLOTH_VLLM_STANDBY"] = "1"
+    logger.info(f"VLLM_USE_V1 = {os.environ.get('VLLM_USE_V1')}")
+    logger.info(f"VLLM_ENFORCE_EAGER = {os.environ.get('VLLM_ENFORCE_EAGER')}")
     train(
         grpo_config_path=args.config,
         training_args_path=args.training_args,

@@ -148,6 +148,10 @@ cd azure
 .\run_jobs.ps1 -DatasetId 'text2sql-grpo-splits:1' -RawDataId 'text2sql-grpo-rawdata:1'
 ```
 
+**Sample console output:**
+
+![prep_data.ps1 console output](docs/data_prep.png)
+
 > **Why two assets?** The `exec_reward` function executes generated SQL against
 > the original SQLite databases at training time. The raw-data asset mounts the
 > Spider + BIRD `.sqlite` files into the training container so the reward can
