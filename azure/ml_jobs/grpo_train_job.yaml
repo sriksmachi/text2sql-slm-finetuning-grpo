@@ -11,8 +11,21 @@ environment: azureml:text2sql-grpo-env@latest
 
 compute: azureml:gpu-cluster-2  # Standard_NC24ads_A100_v4 (1 × A100 40 GB)
 
+distribution:
+  type: pytorch
+  process_count_per_instance: 1  # increase to match GPU count when scaling to multi-GPU
+
+limits:
+  max_run_duration_seconds: 43200  # 12 h hard cap
+
+retry_settings:
+  max_retries: 1
+  timeout: 43200
+
 environment_variables:
   VLLM_USE_FLASHINFER_SAMPLER: "0"
+  VLLM_USE_V1: "0"  # vLLM V1 Flash Attn backend raises AoT scheduling error on A100 + Unsloth; V0 engine works correctly
+  PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"  # Disables expandable_segments which conflicts with Unsloth vLLM standby mode
 
 command: >-
   python src/grpo_trainer.py
@@ -22,6 +35,7 @@ command: >-
   --train-data ${{inputs.csv_splits}}/train.csv
   --val-data ${{inputs.csv_splits}}/val.csv
   --output-dir ${{outputs.model_dir}}
+  --lora-dir ${{outputs.lora_dir}}
   --log-level DEBUG
 
 inputs:
@@ -36,5 +50,8 @@ inputs:
 
 outputs:
   model_dir:
+    type: uri_folder
+    mode: rw_mount
+  lora_dir:
     type: uri_folder
     mode: rw_mount

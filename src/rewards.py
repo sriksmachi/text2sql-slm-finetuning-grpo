@@ -240,7 +240,10 @@ def _exec_on_sqlite(
 
     logger.debug(f"[exec] Resolved full_path={full_path!r}")
     try:
-        conn = sqlite3.connect(full_path)
+        # Open in read-only mode to prevent any accidental writes to the
+        # reference databases (OWASP A03 – injection hardening).
+        conn = sqlite3.connect(f"file:{full_path}?mode=ro", uri=True)
+        conn.execute("PRAGMA query_only = ON")
         conn.execute(sql)
         conn.close()
         return True, None

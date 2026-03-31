@@ -34,13 +34,30 @@
 
 [CmdletBinding()]
 param (
-    [string] $ResourceGroup = "txt2sql-grpo-rg",
-    [string] $Workspace = "txt2sql-grpo-ws",
+    # Azure resource group that contains the AML workspace
+    [string] $ResourceGroup = "sriks-aml-rg",
+
+    # Azure ML workspace name
+    [string] $Workspace = "sriks-aml-ws",
+
+    # Name of the Azure ML environment to create or update in the workspace
     [string] $EnvironmentName = "text2sql-grpo-env",
+
+    # Fully qualified image URI (e.g. myacr.azurecr.io/repo:tag).
+    # When omitted the script auto-resolves the URI from the workspace ACR
+    # using $ImageName and $ImageTag.
     [string] $Image,
+
+    # Repository name inside the workspace ACR (used when $Image is not set)
     [string] $ImageName = "text2sql-grpo",
+
+    # Image tag inside the workspace ACR (used when $Image is not set)
     [string] $ImageTag = "env-v1",
+
+    # Environment version registered in Azure ML (default: "latest")
     [string] $Version = "latest",
+
+    # Stream full Azure CLI output instead of the compact table view
     [switch] $Stream
 )
 
@@ -87,6 +104,25 @@ if (-not $Image) {
 }
 
 $temporarySpecPath = Join-Path $env:TEMP "text2sql-prebuilt-env-$Version.yml"
+
+# If version is "latest" (the default), auto-increment by querying the highest
+# existing version number — AML treats "latest" as an immutable label once set.
+if ($Version -eq "latest") {
+    $existingVersions = az ml environment list `
+        --name $EnvironmentName `
+        --resource-group $ResourceGroup `
+        --workspace-name $Workspace `
+        --only-show-errors `
+        --query "[].version" -o tsv 2>$null
+    $maxVer = 0
+    if ($existingVersions) {
+        foreach ($v in ($existingVersions -split "`n" | Where-Object { $_ -match '^\d+$' })) {
+            if ([int]$v -gt $maxVer) { $maxVer = [int]$v }
+        }
+    }
+    $Version = [string]($maxVer + 1)
+    Write-Host "Auto-incrementing environment version → $Version" -ForegroundColor Yellow
+}
 
 @(
     "`$schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json",

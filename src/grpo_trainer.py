@@ -77,6 +77,9 @@ def _force_disable_flashinfer_sampler() -> None:
     """Force-disable FlashInfer sampler before Unsloth/vLLM import."""
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
     os.putenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    # Reduce CUDA allocator fragmentation so the allocator can reuse reserved
+    # but un-allocated segments instead of requesting new blocks from the driver.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def _load_yaml(path: str | Path) -> dict[str, Any]:
@@ -220,6 +223,29 @@ class MLflowLoggingCallback(TrainerCallback):
         mlflow.log_metrics(metrics, step=state.global_step)
         return control
 
+def _validate_split(path: str | Path, label: str = "") -> None:
+    """Fail fast if a CSV split is missing required columns or contains nulls."""
+    required_cols = {"prompt", "solution", "schema", "source", "db_id"}
+    valid_sources = {"spider", "bird"}
+    df = pd.read_csv(path)
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"[{label}] Dataset at {path} is missing columns: {sorted(missing)}"
+        )
+    null_cols = [c for c in required_cols if df[c].isna().any()]
+    if null_cols:
+        raise ValueError(
+            f"[{label}] Dataset at {path} has null values in columns: {sorted(null_cols)}"
+        )
+    bad_sources = set(df["source"].unique()) - valid_sources
+    if bad_sources:
+        raise ValueError(
+            f"[{label}] Dataset at {path} contains unknown source values: {bad_sources}"
+        )
+    logger.info(f"[{label}] Preflight OK – {len(df)} rows, path={path}")
+
+
 def train(
     grpo_config_path: str,
     training_args_path: str,
@@ -227,6 +253,7 @@ def train(
     train_data_dir: str,
     val_data_dir: str,
     output_dir: str,
+    lora_dir: str | None = None,
 ) -> None:
     """Run the GRPO fine-tuning loop.
 
@@ -243,7 +270,10 @@ def train(
     val_data_dir:
         CSV file containing the validation split prompt records.
     output_dir:
-        Directory where the LoRA adapter will be saved.
+        Directory where HF checkpoints will be saved.
+    lora_dir:
+        Directory where the final LoRA adapter weights are saved.
+        Defaults to ``<output_dir>/grpo_saved_lora`` when not supplied.
     """
     # ── Load configs ───────────────────────────────────────
     grpo_cfg = _load_yaml(grpo_config_path)
@@ -307,7 +337,7 @@ def train(
             max_lora_rank=lora_rank,
             gpu_memory_utilization=grpo_cfg["model"].get(
                 "gpu_memory_utilization", 0.9
-            ),
+            )
         )
         # Attach a LoRA adapter.  Only QKVO projections are trained to stay
         # within GPU memory on a single T4 / A100-40 GB.
@@ -331,6 +361,11 @@ def train(
     train_dataset: list[dict[str, Any]] = []
     val_dataset: list[dict[str, Any]] = []
     logger.debug(f"Ablation config: {ablation}")
+
+    # ── Preflight validation ───────────────────────────────
+    _validate_split(train_data_dir, label="train")
+    _validate_split(val_data_dir, label="val")
+
     if ablation:
         logger.warning(f"Ablation mode enabled: {ablation}. This will affect rewards.")
         train_dataset = _load_prompt_records(train_data_dir)[:10]
@@ -412,7 +447,7 @@ def train(
         raise RuntimeError("trl>=0.8.6 is required for GRPOTrainer.") from exc
 
     # ── Run ────────────────────────────────────────────────
-    lora_save_path = str(Path(output_dir) / "grpo_saved_lora")
+    lora_save_path = str(Path(lora_dir) if lora_dir else Path(output_dir) / "grpo_saved_lora")
     run_context = mlflow.start_run(run_id=os.environ.get("MLFLOW_RUN_ID")) if mlflow_enabled else nullcontext()
     with run_context:
         if mlflow_enabled:
@@ -423,7 +458,7 @@ def train(
                     "num_generations": grpo_cfg["grpo"]["num_generations"],
                     "beta": grpo_cfg["grpo"]["beta"],
                     "epsilon": grpo_cfg["grpo"]["epsilon"],
-                    "reward_weights": reward_weights,
+                    **{f"reward_weight_{k}": v for k, v in reward_weights.items()},
                     "learning_rate": grpo_train_cfg.learning_rate,
                     "per_device_train_batch_size": grpo_train_cfg.per_device_train_batch_size,
                     "gradient_accumulation_steps": grpo_train_cfg.gradient_accumulation_steps,
@@ -458,6 +493,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--val-data", required=True, help="Validation split directory")
     p.add_argument("--output-dir", required=True, help="Directory for checkpoints")
     p.add_argument(
+        "--lora-dir",
+        default=None,
+        help="Directory for final LoRA adapter weights (default: <output-dir>/grpo_saved_lora)",
+    )
+    p.add_argument(
         "--log-level",
         default="DEBUG",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -469,6 +509,7 @@ if __name__ == "__main__":
     args = _parse_args()
     setup_logging(args.log_level)
     os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+    os.environ["UNSLOTH_VLLM_STANDBY"] = "1"
     train(
         grpo_config_path=args.config,
         training_args_path=args.training_args,
@@ -476,4 +517,5 @@ if __name__ == "__main__":
         train_data_dir=args.train_data,
         val_data_dir=args.val_data,
         output_dir=args.output_dir,
+        lora_dir=args.lora_dir,
     )

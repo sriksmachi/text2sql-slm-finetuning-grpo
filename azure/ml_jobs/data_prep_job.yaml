@@ -22,7 +22,7 @@ command: >-
   --seed ${{inputs.seed}}
 
 inputs:
-  sample_size: -1 # -1 means "use all available data"; min = 8. Default is 400, which is a good balance for development and testing. For final runs, consider using -1 to leverage the full dataset.
+  sample_size: 16 # -1 means "use all available data"; min = 8. For final runs, consider using -1 to leverage the full dataset, approx training time 30 hours on an A100 80 GB with the current GRPO config. Setting a sample_size is useful for testing the pipeline with a smaller subset of data, which can reduce runtime to minutes.
   train_ratio: 0.7
   val_ratio: 0.15
   seed: 42

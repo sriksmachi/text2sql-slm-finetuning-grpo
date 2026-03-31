@@ -10,11 +10,11 @@
 
 .PARAMETER ResourceGroup
     Azure resource group that contains the AML workspace.
-    Defaults to: txt2sql-grpo-rg
+    Defaults to: sriks-aml-rg
 
 .PARAMETER Workspace
     Azure ML workspace name.
-    Defaults to: txt2sql-grpo-ws
+    Defaults to: sriks-aml-ws
 
 .PARAMETER ImageName
     Repository name in ACR.
@@ -42,10 +42,10 @@
 
 [CmdletBinding()]
 param (
-    [string] $ResourceGroup = "txt2sql-grpo-rg",
-    [string] $Workspace = "txt2sql-grpo-ws",
+    [string] $ResourceGroup = "sriks-aml-rg",
+    [string] $Workspace = "sriks-aml-ws",
     [string] $ImageName = "text2sql-grpo",
-    [string] $ImageTag = "env-v1",
+    [string] $ImageTag = "env-v2",
     [ValidateSet("acr", "local")]
     [string] $BuildMode = "acr",
     [switch] $RegisterEnvironment

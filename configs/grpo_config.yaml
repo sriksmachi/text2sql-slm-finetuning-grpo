@@ -3,25 +3,24 @@
 
 model:
   name_or_path: "unsloth/Qwen2.5-3B-Instruct"
-  torch_dtype: "float16"
+  torch_dtype: "bfloat16"  # A100 has native BF16 Tensor Cores
   load_in_4bit: true
   use_gradient_checkpointing: "unsloth"
   lora_rank: 32
-  fast_inference: auto
-  gpu_memory_utilization: 0.9
+  fast_inference: auto   # A100 80 GB supports vLLM fast inference
+  gpu_memory_utilization: 0.60  # Lowered from 0.90: Unsloth vLLM standby mode conflicts with PyTorch expandable_segments allocator above ~0.65
   random_state: 3407
 
 grpo:
-  # Number of rollout samples per prompt
-  num_generations: 8
+  # Number of rollout samples per prompt, this defines the effective batch size and must be divisible by num_generations.
+  num_generations: 4
   # Max tokens to generate during rollout
-  # SQL queries are short; metrics show mean terminated length ~200 tokens.
-  # Keeping this at 768 avoids prompt truncation and reduces clipping ratio.
-  max_completion_length: 768
+  # Reduced from 384 → 256 to shrink KV-cache footprint on a 16 GiB GPU.
+  max_completion_length: 256
   # Temperature for sampling
-  temperature: 1.0
+  temperature: 0.7
   # KL penalty coefficient
-  beta: 0.02
+  beta: 0.05
   # Clip range for the policy ratio
   epsilon: 0.2
   # Number of PPO-style update steps per batch
@@ -33,9 +32,9 @@ grpo:
   
 tokenizer:
   # Must be large enough to hold prompt + completion without truncation.
-  # Prompts with large schemas tokenize to ~2560 tokens; with max_completion_length=512
-  # the total reaches ~3072, so 4096 provides safe headroom.
-  max_length: 4096
+  # Prompts with large schemas tokenize to ~2560 tokens; with max_completion_length=256
+  # the total reaches ~2816, so 3072 provides safe headroom and reduces padding overhead.
+  max_length: 3072
   truncation_side: "left"
   padding_side: "left"
 

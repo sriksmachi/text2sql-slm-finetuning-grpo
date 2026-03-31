@@ -1,20 +1,21 @@
 # conda_env.yml – Conda environment for Text-to-SQL GRPO training on Azure ML.
 #
 # Base Docker image:
-#   mcr.microsoft.com/azureml/openmpi4.1.0-cuda11.8-cudnn8-ubuntu22.04
-# (specified in environment.yml)
+#   nvcr.io/nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
+# (specified in Dockerfile)
 #
-# GPU target: NVIDIA A100 (40 GB) or V100 (16 GB)
-# CUDA:       11.8   Torch: 2.4.x
+# GPU target: NVIDIA A100 80 GB (Standard_NC24ads_A100_v4)
+# CUDA:       12.6   Torch: 2.7.0+cu126
 
 name: text2sql-grpo
 channels:
+  - conda-forge   # open channel, no ToS required
   - defaults
 dependencies:
   - python=3.12.12
   - pip
   - pip:
-    # ── PyTorch (CUDA 11.8 wheel) ──────────────────────────────────────────
+    # ── PyTorch (CUDA 12.6 wheel) ─────────────────────────────────────────
     - torch==2.7.0
     - torchvision
     - torchaudio

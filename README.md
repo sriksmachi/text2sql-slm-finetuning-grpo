@@ -2,9 +2,8 @@
 
 > **Enterprise-grade, open-source GRPO pipeline that proves true schema generalisation**
 
-[![CI](https://github.com/sriksmachi/text2sql-grpo-azure-ml/actions/workflows/ci.yml/badge.svg)](https://github.com/sriksmachi/text2sql-grpo-azure-ml/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
 ---
 
@@ -122,15 +121,38 @@ az group create --name rg-text2sql-dev --location eastus
 az deployment group create --resource-group rg-text2sql-dev --template-file azure/bicep/main.bicep --parameters baseName=text2sql environment=dev ownerObjectId=$(az ad signed-in-user show --query id -o tsv)
 ```
 
-### Run the full pipeline
+### Run the pipeline
 
-```bash
-az ml job create \
-  --file azure/ml_jobs/pipeline.yaml \
-  --resource-group rg-text2sql-dev \
-  --workspace-name aml-text2sql-dev \
-  --stream
+Data preparation is decoupled from training and evaluation. `prep_data.ps1`
+registers **two** AML dataset assets — the CSV splits and the raw SQLite
+databases — then writes their IDs to `last_dataset_id.txt` and
+`last_rawdata_id.txt`. `run_jobs.ps1` reads both files automatically, so
+you only need to pass explicit IDs when overriding defaults.
+
+```powershell
+cd azure
+
+# Step 1 – build and register the Docker environment (first time only)
+.\build_image.ps1 -RegisterEnvironment -ResourceGroup sriks-aml-rg -Workspace sriks-aml-ws
+
+# Step 2 – prepare data and register both assets (run once or on dataset refresh)
+.\prep_data.ps1
+# Prints:
+#   Dataset registered : text2sql-grpo-splits:1   → last_dataset_id.txt
+#   Raw data registered: text2sql-grpo-rawdata:1  → last_rawdata_id.txt
+
+# Step 3 – train + evaluate (both IDs auto-read from the txt files above)
+.\run_jobs.ps1
+
+# Or pass them explicitly:
+.\run_jobs.ps1 -DatasetId 'text2sql-grpo-splits:1' -RawDataId 'text2sql-grpo-rawdata:1'
 ```
+
+> **Why two assets?** The `exec_reward` function executes generated SQL against
+> the original SQLite databases at training time. The raw-data asset mounts the
+> Spider + BIRD `.sqlite` files into the training container so the reward can
+> run live query execution. Without it, `exec_reward` silently returns `0.0`
+> for every sample, making the dominant reward signal inactive.
 
 ### Register the Azure ML environment
 
@@ -144,38 +166,20 @@ az ml environment create \
 
 ### Run individual jobs
 
-```bash
-RG=rg-text2sql-dev
-WS=aml-text2sql-dev
+```powershell
+$RG = "sriks-aml-rg"
+$WS = "sriks-aml-ws"
 
-# 1. Data preparation (CPU cluster)
-az ml job create \
-  --file azure/ml_jobs/data_prep_job.yaml \
-  --resource-group $RG --workspace-name $WS --stream
+# 1. Data preparation (CPU cluster) — or use .\prep_data.ps1 to also register both assets
+.\run_jobs.ps1 -Mode job -Job data_prep -ResourceGroup $RG -Workspace $WS
 
 # 2. GRPO training (GPU cluster – Standard_NC24ads_A100_v4)
-az ml job create \
-  --file azure/ml_jobs/grpo_train_job.yaml \
-  --resource-group $RG --workspace-name $WS --stream
+#    Reads rawdata_dir from last_rawdata_id.txt written by prep_data.ps1
+.\run_jobs.ps1 -Mode job -Job train -ResourceGroup $RG -Workspace $WS
 
 # 3. Evaluation (GPU cluster)
-az ml job create \
-  --file azure/ml_jobs/eval_job.yaml \
-  --resource-group $RG --workspace-name $WS --stream
+.\run_jobs.ps1 -Mode job -Job eval -ResourceGroup $RG -Workspace $WS
 ```
-
-> **Tip:** pipe inputs / outputs between standalone jobs with `--set inputs.<name>=azureml:<job_name>:<output_name>`, or use the pipeline to wire them automatically.
-
-### Launch the Streamlit demo locally
-
-```bash
-pip install -r requirements.txt
-export AZURE_ML_ENDPOINT_URL="https://<your-endpoint>.inference.ml.azure.com/score"
-export AZURE_ML_ENDPOINT_KEY="<your-key>"
-streamlit run demo/streamlit_app.py
-```
-
----
 
 ## 💰 Estimated Azure Cost
 
@@ -197,40 +201,83 @@ streamlit run demo/streamlit_app.py
 ## 🏗️ Project Structure
 
 ```
-text2sql-grpo-azure-ml/
-├── .github/workflows/        # CI: lint + unit tests
+text2sql-slm-finetuning-grpo/
 ├── azure/
-│   ├── bicep/                # main.bicep (workspace, compute, endpoints)
 │   ├── ml_jobs/
-│   │   ├── pipeline.yaml     # End-to-end pipeline (data prep → train → eval)
-│   │   ├── data_prep_job.yaml
-│   │   ├── grpo_train_job.yaml
-│   │   └── eval_job.yaml
-│   └── environments/
-│       ├── environment.yml   # Azure ML environment definition
-│       └── conda_env.yml     # Conda spec (PyTorch 2.4 + CUDA 12.1 + Unsloth)
-├── configs/                  # grpo_config.yaml, training_args.yaml, reward_weights.yaml
+│   │   ├── train_eval_pipeline.yaml  # Train+eval pipeline (grpo_train → eval)
+│   │   ├── data_prep_job.yaml        # Standalone CPU data-prep job
+│   │   ├── grpo_train_job.yaml       # Standalone GPU training job
+│   │   └── eval_job.yaml             # Standalone evaluation job
+│   ├── environments/
+│   │   ├── environment.yml           # Azure ML environment definition
+│   │   ├── conda_env.yml             # Conda spec (PyTorch + CUDA + Unsloth)
+│   │   └── Dockerfile                # CUDA base + Unsloth + TRL
+│   ├── prep_data.ps1                 # Submit data prep job; register csv_splits + rawdata_dir assets
+│   ├── run_jobs.ps1                  # Submit train+eval pipeline or individual jobs
+│   ├── build_image.ps1               # Build and push Docker image; optionally register AML env
+│   ├── create_env.ps1                # Register the AML environment from a pre-built image
+│   ├── last_dataset_id.txt           # Auto-written by prep_data.ps1 (csv_splits asset ID)
+│   └── last_rawdata_id.txt           # Auto-written by prep_data.ps1 (rawdata_dir asset ID)
+├── configs/
+│   ├── grpo_config.yaml              # GRPO algorithm + model config
+│   ├── training_args.yaml            # HF TrainingArguments overrides
+│   └── reward_weights.yaml          # Reward component weights
 ├── data/
-│   ├── prep/                 # download_spider_bird.py, serialize_schemas.py, schema_split.py
-│   └── synthetic/            # enterprise schemas (TPC-H, HR, Sales, Inventory)
+│   ├── bird/                         # BIRD dev set (dev.json, dev_databases/)
+│   ├── spider/                       # Spider dataset (train/dev/test splits + databases/)
+│   ├── serialized_schemas/           # schema_lookup.json (pre-serialized table/column info)
+│   └── splits/                       # HF Arrow splits (train / val / test)
 ├── src/
-│   ├── data_preparation.py   # Download, serialize schemas, produce HF + CSV splits
-│   ├── rewards.py            # format_reward, exec_reward, schema_fidelity_reward
-│   ├── grpo_trainer.py       # Unsloth + TRL GRPOTrainer wrapper
-│   ├── evaluator.py          # cross_schema_exec_acc, mlflow logging
-│   └── utils.py              # shared utilities
-├── demo/
-│   └── streamlit_app.py      # Demo calling Azure managed endpoint
+│   ├── data_preparation.py           # Serialize schemas, produce HF + CSV Arrow splits
+│   ├── rewards.py                    # format_reward, exec_reward, schema_fidelity_reward
+│   ├── grpo_trainer.py               # Unsloth + TRL GRPOTrainer wrapper
+│   ├── evaluator.py                  # cross_schema_exec_acc, mlflow logging
+│   └── utils.py                      # Shared utilities
 ├── notebooks/
-│   ├── 01_data_exploration.ipynb
-│   └── 02_baseline_sft.ipynb
-├── docker/
-│   └── Dockerfile            # CUDA 12.1 + Unsloth + TRL
-├── tests/                    # pytest unit tests
+│   ├── 01_txt2sql-GRPO-finetuning-nb.ipynb
+│   └── 02_baseline_azureopenai_gpt.ipynb
+├── tests/                            # pytest unit tests
 ├── requirements.txt
 ├── pyproject.toml
 └── LICENSE (MIT)
 ```
+
+---
+
+## ⚠️ Known Issues & Environment Notes
+
+### Unsloth vLLM standby mode — memory allocator conflict
+
+Unsloth's vLLM standby mode is incompatible with PyTorch's `expandable_segments`
+CUDA memory allocator (the default on recent drivers). Symptoms:
+
+```
+MemoryError: Unsloth: Your GPU ran out of memory loading vLLM with standby mode
+enabled. Original error: Standby mode is not supported with expandable segments.
+Please set environment variable PYTORCH_CUDA_ALLOC_CONF without expandable_segments:True
+```
+
+**Fixes applied** (in `configs/grpo_config.yaml`, `azure/ml_jobs/train_eval_pipeline.yaml`,
+and `azure/ml_jobs/grpo_train_job.yaml`):
+
+| Setting | Value | Reason |
+|---|---|---|
+| `gpu_memory_utilization` | `0.60` (was `0.90`) | Unsloth standby mode fails above ~0.65 on A100 40 GB |
+| `PYTORCH_CUDA_ALLOC_CONF` | `max_split_size_mb:512` | Disables `expandable_segments`; uses fixed-size block allocator |
+
+### exec_reward requires rawdata_dir asset
+
+The `exec_reward` function executes generated SQL against the original `.sqlite`
+files at training time. The SQLite databases are **not** included in the CSV
+Arrow splits — they live in a separate AML asset (`text2sql-grpo-rawdata`)
+mounted as `RAWDATA_DIR` inside the training container.
+
+If this asset is missing or not passed to the pipeline, `exec_reward` silently
+returns `0.0` for every sample (the execution path resolves to an empty base
+path). The `exec_reward` weight is `0.5`, so this effectively disables the
+dominant reward component. Always run `prep_data.ps1` before submitting a
+training job rather than re-using a stale `last_rawdata_id.txt` from a
+different cluster or workspace.
 
 ---
 

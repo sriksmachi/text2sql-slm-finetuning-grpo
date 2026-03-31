@@ -137,6 +137,9 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+
+# Azure ML local state
+azure/last_dataset_id.txt
 .venv
 env/
 venv/
@@ -219,3 +222,4 @@ data/serialized_schemas
 .github/
 .copilot/
 .squad/
+test_fastinf/
