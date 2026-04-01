@@ -18,7 +18,7 @@ grpo:
   # Reduced from 384 → 256 to shrink KV-cache footprint on a 16 GiB GPU.
   max_completion_length: 256
   # Temperature for sampling
-  temperature: 0.7
+  temperature: 0.5
   # KL penalty coefficient
   beta: 0.05
   # Clip range for the policy ratio

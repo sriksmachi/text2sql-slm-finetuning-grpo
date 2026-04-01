@@ -95,11 +95,9 @@ def _force_disable_flashinfer_sampler() -> None:
     # but un-allocated segments instead of requesting new blocks from the driver.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-
 def _load_yaml(path: str | Path) -> dict[str, Any]:
     with open(path) as fh:
         return yaml.safe_load(fh)
-
 
 def _assert_unsloth_runtime_compatibility() -> None:
     """Fail early with an actionable error if the Torch build is incompatible."""
@@ -114,7 +112,6 @@ def _assert_unsloth_runtime_compatibility() -> None:
             "a torch 2.4.x build and unsloth[cu118-ampere-torch240]. "
             f"Detected torch=={torch_version}."
         )
-
 
 def _configure_vllm_runtime() -> None:
     """Adjust vLLM environment flags for the current GPU before import."""
@@ -143,7 +140,6 @@ def _configure_vllm_runtime() -> None:
     # caller explicitly depends on it.
     if "VLLM_ATTENTION_BACKEND" in os.environ:
         os.environ.pop("VLLM_ATTENTION_BACKEND", None)
-
 
 def _log_runtime_versions() -> None:
     """Log the resolved package/runtime versions for the current job."""
@@ -259,7 +255,6 @@ def _validate_split(path: str | Path, label: str = "") -> None:
         )
     logger.info(f"[{label}] Preflight OK – {len(df)} rows, path={path}")
 
-
 def train(
     grpo_config_path: str,
     training_args_path: str,
@@ -314,6 +309,7 @@ def train(
     mlflow_enabled, mlflow_message = configure_mlflow_tracking(
         train_cfg.get("run_name", "text2sql-grpo"),
     )
+    
     if not mlflow_enabled and mlflow_message:
         logger.warning(f"MLflow disabled: {mlflow_message}")
 
@@ -326,6 +322,7 @@ def train(
         from unsloth import FastLanguageModel  # type: ignore
 
         gpu_profile = get_gpu_runtime_profile()
+        
         model_dtype = resolve_model_dtype(
             grpo_cfg["model"].get("torch_dtype"),
             gpu_profile,

@@ -34,6 +34,20 @@ Usage (CLI)
 """
 
 from __future__ import annotations
+import os
+
+# === STRONGER DISABLE FOR vLLM v1 + FULL CUDA GRAPH (critical for your error) ===
+os.environ["VLLM_USE_V1"] = "0"                          # Primary: force old vLLM engine
+os.environ["VLLM_ENFORCE_EAGER"] = "1"                   # ← NEW: Disable all CUDA graphs entirely (most reliable workaround)
+os.environ["UNSLOTH_VLLM_DISABLE_FULL_CUDAGRAPH"] = "1"
+os.environ["UNSLOTH_VLLM_STANDBY"] = "0"
+os.environ["VLLM_FLASH_ATTN"] = "0"
+os.environ["VLLM_USE_FLASHINFER"] = "0"
+os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+
+# Extra safety to reduce graph-related compilation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["VLLM_CUDAGRAPH_MODE"] = "0"
 
 import argparse
 import ast
@@ -117,15 +131,23 @@ def run_prompt(
 
     if fast_inference:
         from vllm import SamplingParams  # type: ignore
+        logger.debug("Running fast_generate with vLLM: temperature={}, top_p={}, max_new_tokens={}, lora_adapter={}",
+                     temperature, top_p, max_new_tokens, "yes" if lora_request else "no")
 
         sampling_params = SamplingParams(
             temperature=temperature, top_p=top_p, max_tokens=max_new_tokens
         )
+
         kwargs: dict[str, Any] = {"sampling_params": sampling_params}
+
         if lora_request is not None:
             kwargs["lora_request"] = lora_request
+
         return model.fast_generate(text, **kwargs)[0].outputs[0].text
+
     else:
+        logger.debug("Running fast_generate with HuggingFace: temperature={}, top_p={}, max_new_tokens={}, LoRA={}",
+                     temperature, top_p, max_new_tokens, "yes" if lora_request else "no")
         tokens = tokenizer(text, return_tensors="pt")
         input_len = tokens["input_ids"].shape[-1]
         # PeftModel wraps the base Unsloth model; its __getattr__ delegates
@@ -158,6 +180,7 @@ def run_prompt(
 def compute_rewards(
     dataset: pd.DataFrame,
     completion_col: str = "completion",
+    weights: dict | None = None,
 ) -> list[float]:
     """Score all rows in *dataset* using ``combined_reward``.
 
@@ -193,6 +216,7 @@ def compute_rewards(
         schemas=dataset["schema"].tolist(),
         source=dataset["source"].tolist(),
         db_paths=dataset["db_id"].tolist(),
+        weights=weights,
     )
 
 
@@ -206,9 +230,9 @@ def evaluate(
     test_data_path: str,
     eval_results: str,
     lora_path: str | None = None,
-    temperature: float = 0.7,
+    temperature: float | None = None,
     top_p: float = 0.95,
-    max_tokens: int = 1024,
+    max_tokens: int | None = None,
 ) -> dict[str, float]:
     """Run baseline and (optionally) fine-tuned evaluation on the test split.
 
@@ -257,7 +281,34 @@ def evaluate(
     grpo_cfg = _load_yaml(grpo_config_path)
     max_seq_length = grpo_cfg["tokenizer"]["max_length"]
     model_name = grpo_cfg["model"]["name_or_path"]
+
+    # Use training config values when not overridden — ensures eval metrics are
+    # computed under the same conditions the policy was optimised for.
+    if temperature is None:
+        temperature = grpo_cfg["grpo"].get("temperature", 0.5)
+    if max_tokens is None:
+        max_tokens = grpo_cfg["grpo"].get("max_completion_length", 256)
+
+    # Load reward weights from the same file used during training so that
+    # eval scores are directly comparable to training-time rewards.
+    reward_weights_path = grpo_cfg["reward"].get("weights_file", "configs/reward_weights.yaml")
+    try:
+        _rw = _load_yaml(reward_weights_path)
+        reward_weights: dict | None = {
+            "format": _rw.get("format_reward", 0.15),
+            "exec": _rw.get("exec_reward", 0.5),
+            "schema_fidelity": _rw.get("schema_fidelity_reward", 0.25),
+            "sql_fence": _rw.get("sql_fence_reward", 0.1),
+            "no_sql_penalty": _rw.get("no_sql_penalty", -1.0),
+            "unknown_schema_item_penalty": _rw.get("unknown_schema_item_penalty", 0.0),
+        }
+        logger.info("Reward weights loaded from {}: {}", reward_weights_path, reward_weights)
+    except Exception as exc:
+        logger.warning("Could not load reward weights from {}: {} — using defaults", reward_weights_path, exc)
+        reward_weights = None
+
     logger.debug("Loaded grpo_config: model={}, tokenizer.max_length={}", model_name, max_seq_length)
+    logger.debug("Eval params resolved: temperature={}, max_tokens={}", temperature, max_tokens)
 
     # ── MLflow ─────────────────────────────────────────────
     import mlflow
@@ -289,13 +340,37 @@ def evaluate(
     try:
         from unsloth import FastLanguageModel  # type: ignore
 
+        lora_rank: int = grpo_cfg["model"].get("lora_rank", 32)
+
+        # When fast_inference=True and lora_path is provided, load from the
+        # LoRA adapter directory rather than the base model name.  This is the
+        # approach recommended by the Unsloth maintainers (unsloth/issues/1670):
+        # Unsloth detects adapter_config.json, loads the base model, and
+        # correctly initialises the vLLM LoRA engine — making load_lora()
+        # available.  Passing the base model name instead causes a silent
+        # fallback to a plain HF model (because bitsandbytes 4-bit and vLLM
+        # are incompatible), which leaves load_lora() unpatched.
+        # With this approach the baseline pass uses lora_request=None (base
+        # weights) and the fine-tuned pass uses lora_request=model.load_lora().
+        load_name = lora_path if (fast_inference and lora_path is not None) else model_name
+        if load_name != model_name:
+            logger.info(
+                "fast_inference=True with lora_path set — loading model from "
+                "LoRA adapter directory ({}) so vLLM LoRA engine initialises "
+                "correctly (see unsloth/issues/1670).",
+                load_name,
+            )
+
         model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=model_name,
+            model_name=load_name,
             max_seq_length=max_seq_length,
             load_in_4bit=grpo_cfg["model"].get("load_in_4bit", True),
             dtype=model_dtype,
             fast_inference=fast_inference,
+            max_lora_rank=lora_rank if lora_path is not None else 0,
+            gpu_memory_utilization=grpo_cfg["model"].get("gpu_memory_utilization", 0.6),
         )
+
         logger.info("Model loaded successfully.")
     except ImportError:
         raise ImportError(
@@ -345,7 +420,7 @@ def evaluate(
             lambda p: run_prompt(p, model, tokenizer, temperature, top_p, max_tokens, fast_inference, lora_request=None)
         )
         logger.debug("Baseline inference complete. Scoring {} rows…", len(baseline_df))
-        baseline_df["reward"] = compute_rewards(baseline_df)
+        baseline_df["reward"] = compute_rewards(baseline_df, weights=reward_weights)
 
         baseline_csv = output_path / "baseline_results.csv"
         baseline_df.to_csv(baseline_csv, index=False)
@@ -364,27 +439,26 @@ def evaluate(
         if lora_path is not None:
             logger.info(f"Running fine-tuned inference with LoRA from {lora_path}…")
             if fast_inference:
-                # vLLM path: load_lora() returns a lora_request object used per-call.
+                # vLLM path: model was loaded from lora_path so the vLLM LoRA
+                # engine is initialised and load_lora() is available.
                 lora_request = model.load_lora(lora_path)
+                _ft_fast = True
             else:
-                # HF path: load the PEFT adapter WITHOUT merging.
-                # merge_and_unload() on a 4-bit quantised model causes rounding
-                # errors that corrupt generation (model outputs garbage).  Keep
-                # the PeftModel so LoRA weights stay as adapter layers; run_prompt
-                # detects PeftModel and calls .generate() which routes the forward
-                # pass through the LoRA layers correctly.
+                # HF/PEFT path: load the adapter WITHOUT merging so LoRA
+                # weights stay active through standard .generate().
                 from peft import PeftModel  # type: ignore
 
                 model = PeftModel.from_pretrained(model, lora_path)
                 model.eval()
                 lora_request = None
+                _ft_fast = False
 
             finetuned_df = test_df.copy()
             finetuned_df["completion"] = finetuned_df["prompt"].progress_apply(
-                lambda p: run_prompt(p, model, tokenizer, temperature, top_p, max_tokens, fast_inference, lora_request)
+                lambda p: run_prompt(p, model, tokenizer, temperature, top_p, max_tokens, _ft_fast, lora_request)
             )
             logger.debug("Fine-tuned inference complete. Scoring {} rows…", len(finetuned_df))
-            finetuned_df["reward"] = compute_rewards(finetuned_df)
+            finetuned_df["reward"] = compute_rewards(finetuned_df, weights=reward_weights)
 
             finetuned_csv = output_path / "finetuned_results.csv"
             finetuned_df.to_csv(finetuned_csv, index=False)
@@ -404,7 +478,7 @@ def evaluate(
             mlflow.log_metrics(metrics)
 
         logger.debug("Final metrics: {}", metrics)
-
+        
     logger.info("Evaluation complete. Results written to {}.", eval_results)
     return metrics
 
@@ -423,9 +497,15 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Path to saved LoRA adapter for fine-tuned evaluation",
     )
-    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument(
+        "--temperature", type=float, default=None,
+        help="Sampling temperature (default: read from grpo_config.yaml)",
+    )
     p.add_argument("--top-p", type=float, default=0.95)
-    p.add_argument("--max-tokens", type=int, default=1024)
+    p.add_argument(
+        "--max-tokens", type=int, default=None,
+        help="Max tokens to generate (default: read max_completion_length from grpo_config.yaml)",
+    )
     p.add_argument(
         "--log-level",
         default="DEBUG",

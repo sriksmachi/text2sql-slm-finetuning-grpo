@@ -27,7 +27,7 @@ flowchart LR
         K --> L[MLflow · Azure ML\nmetrics & artefacts]
     end
 
-    subgraph Deploy["Deployment"]
+    subgraph Deploy["Deployment - Does not include in the sample"]
         J --> M[Azure ML\nManaged Online Endpoint]
         M --> N[Streamlit Demo\ndemo/streamlit_app.py]
     end
@@ -37,9 +37,11 @@ flowchart LR
 
 ## 📊 Results
 
-Rewards are evaluated as the average combined score (`format × 0.2 + exec × 0.5 + schema_fidelity × 0.3`) across held-out splits using schemas unseen during training (schema-level split strategy). The SLM is `unsloth/Qwen2.5-3B-Instruct` fine-tuned with 4-bit QLoRA + GRPO for 2 epochs on a 400-sample subset. **GPT-5.1** (Azure OpenAI) is evaluated on the same test set as a strong upper-bound reference.
+Rewards are evaluated as the average combined score (`format × 0.2 + exec × 0.4 + schema_fidelity × 0.3 + sql_fence × 0.1`) across held-out splits using schemas unseen during training (schema-level split strategy). Two evaluation runs are reported: a **quick ablation** on a 400-sample subset (2 epochs) and a **full production run** (5 epochs, 1,390 steps, 245 test rows from the schema-level hold-out). **GPT-5.1** (Azure OpenAI) is evaluated on the same test set as a strong upper-bound reference.
 
-| Dataset | SLM · pre-GRPO ¹ | SLM · post-GRPO ¹ | Δ ablation (abs / rel) | GPT-5.1 ² |
+#### Ablation study (400-sample subset · 2 epochs)
+
+| Dataset | SLM · pre-GRPO ¹ | SLM · post-GRPO ¹ | Δ (abs / rel) | GPT-5.1 ² |
 |---|---:|---:|---:|---:|
 | **Spider** | 0.8365 | **0.8907** | +0.0542 / **+6.48%** | 0.9865 |
 | **BIRD** | 0.7133 | **0.7574** | +0.0441 / **+6.18%** | 0.9770 |
@@ -48,9 +50,18 @@ Rewards are evaluated as the average combined score (`format × 0.2 + exec × 0.
 > ¹ GRPO ablation: 400-sample subset, 2 epochs, schema-level split — not trained on full corpus.  
 > ² GPT-5.1 evaluated on the same held-out test set; no fine-tuning.
 
-Both SLM datasets improved by ~6%, showing balanced generalisation gains across a clean benchmark (Spider) and a harder, noisier one (BIRD) — with no cross-dataset trade-off. The `exec_reward` component provides the dominant training signal; a query either executes or it doesn't.
+#### Full production run (full corpus · 5 epochs · run `be59c12c` · 2026-04-01)
 
-The GRPO-trained 3B SLM reaches **90.3% of GPT-5.1's reward on Spider** and **77.5% on BIRD**, closing a meaningful fraction of the gap to a frontier model at a fraction of the inference cost.
+| Dataset | SLM · pre-GRPO (baseline) | SLM · post-GRPO ³ | Δ (abs / rel) | % of GPT-5.1 |
+|---|---:|---:|---:|---:|
+| **Spider** | 0.9544 | **0.9672** | +0.0128 / **+1.34%** | **98.0%** |
+| **BIRD** | 0.5906 | **0.7037** | +0.1131 / **+19.15%** | **72.0%** |
+| **Overall avg** | 0.7183 | **0.7962** | +0.0779 / **+10.85%** | — |
+
+> ³ Full corpus training: 1,112 train rows, 5 epochs, 1,390 steps, LoRA rank 32 (QKVO), temperature 0.5, max_completion_length 256, A100 80 GB PCIe.  
+> Evaluation on 245 held-out test rows (159 BIRD / 86 Spider), same reward weights as training.
+
+The full run delivers a **+10.85% overall reward improvement**, driven primarily by a **+19.15% gain on BIRD** — the harder, noisier benchmark. Spider was already near-ceiling for the 3B model at baseline (0.9544), leaving only 3.2% headroom before GPT-5.1; the +1.34% gain closes it further to **98.0% of GPT-5.1 on Spider**. The `exec_reward` component provides the dominant training signal; a query either executes or it doesn't.
 
 ### Training Configuration
 
@@ -58,18 +69,50 @@ The GRPO-trained 3B SLM reaches **90.3% of GPT-5.1's reward on Spider** and **77
 |---|---|---|
 | Base model | `unsloth/Qwen2.5-3B-Instruct` (4-bit QLoRA) | Strong code baseline; fits in 40 GB at 4-bit |
 | LoRA rank | 32 (QKVO modules) | Balances capacity vs. memory; gate/up/down projections excluded |
-| Epochs | 2 | Proof-of-concept run on a sampled subset |
-| Per-device batch size | 3 | Limited by GPU VRAM with 2048-token sequences |
-| Gradient accumulation steps | 6 → **effective batch = 18** | Stabilises policy gradient updates |
+| Epochs | 5 | Full corpus training run |
+| Per-device batch size | 4 | Limited by GPU VRAM with 3072-token sequences |
+| Gradient accumulation steps | 4 → **effective batch = 16** | Stabilises policy gradient updates |
 | Learning rate | 2e-5 (cosine schedule, 5% warmup) | Conservative; avoids reward hacking early in training |
-| GRPO generations per prompt | 3 | Group size for relative advantage estimation |
-| Sampling temperature | 0.7 | Maintains exploration without excessive randomness |
-| KL penalty β | 0.04 | Keeps policy close to the reference; prevents mode collapse |
+| GRPO generations per prompt | 4 | Group size for relative advantage estimation |
+| Sampling temperature | 0.5 | Lower than default; reduces sampling noise during rollout |
+| KL penalty β | 0.05 | Keeps policy close to the reference; prevents mode collapse |
 | Policy clip ε | 0.2 | Standard PPO-style clip; limits per-step policy change |
-| Max sequence length | 2048 | Covers schema prompt + multi-join SQL completions |
-| Reward weights | format 0.2 · exec 0.5 · schema_fidelity 0.3 | Execution correctness dominates; format is a soft gate |
+| Max sequence length | 3072 | Covers schema prompt + multi-join SQL completions with headroom |
+| Reward weights | format 0.2 · exec 0.4 · schema_fidelity 0.3 · sql_fence 0.1 | Execution correctness dominates; sql_fence is a lightweight formatting gate |
+
+### Training Run 
+
+Full GRPO training run on Azure ML · NVIDIA A100 80 GB PCIe 
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA A100 80 GB PCIe |
+| AML Compute Cluster | Standard_NC24ads_A100_v4 (1 Node) |
+| Runtime | 4 h 55 m 59 s (17,759 s) |
+| Dataset | 1,112 train / 193 val rows |
+| Steps / Epochs | 1,390 steps · 5 epochs |
+| Effective batch size | 16 (device=4 × grad_accum=4) |
+| Trainable params | 14,745,600 / 3,100,684,288 (0.48%) |
+| Final train loss | 0.0258 |
+| Reward @ step 1 | 0.6074 |
+| Reward @ step 1390 | **0.9688** |
+| Throughput | 0.313 samples/s · 0.078 steps/s |
+
+**Reward trajectory:** Started at 0.61, crossed 0.75 by step ~38, reached 0.85+ by ~step 800, and converged near 0.97 at the final step. The steep early rise reflects rapid enforcement of the code-block format constraint (`format_reward` hits 1.0 for nearly all samples by step 2); subsequent gains are driven by `exec_reward` (SQL executability) and `schema_fidelity_reward` (correct column/table references).
+
+**KL divergence:** Remained low (0.0–0.05) through most of training, with occasional spikes up to 0.4–0.5 on hard BIRD batches, confirming the policy stayed close to the reference model.
+
+**Learning rate:** Cosine schedule with 5% warmup — peaked at ~2×10⁻⁵ around step 250 and decayed smoothly to near zero by step 1,390.
+
+**Gradient norm:** Stable below 1.0 throughout, with one notable spike (~6.5) around step 610 that self-resolved, indicating no divergence.
+
+![Training metrics — reward, KL, learning rate, grad norm](docs/train_run.png)
+
+---
 
 ### Analysis
+
+#### Ablation study (400-sample · 2 epochs)
 
 **Spider — strong gain (+6.48%, reaching 90.3% of GPT-5.1)**  
 Spider improved from 0.8365 to 0.8907 against a GPT-5.1 ceiling of 0.9865, indicating that GRPO successfully reinforced executable query structures, better join paths, and schema-consistent column usage. The magnitude of this gain is meaningful for a short RL run and reflects genuine policy improvement rather than random variance.
@@ -77,20 +120,30 @@ Spider improved from 0.8365 to 0.8907 against a GPT-5.1 ceiling of 0.9865, indic
 **BIRD — meaningful improvement on a harder benchmark (+6.18%, reaching 77.5% of GPT-5.1)**  
 BIRD increased from 0.7133 to 0.7574 against a GPT-5.1 ceiling of 0.9770. The larger remaining gap to GPT-5.1 on BIRD (vs. Spider) reflects the benchmark's higher query complexity, noisier schema semantics, and greater compositional burden — areas where the 3B model's capacity is a limiting factor.
 
+#### Full production run (5 epochs · run `be59c12c` · 2026-04-01)
+
+**Spider — near-ceiling performance reaching 98.0% of GPT-5.1 (+1.34%)**  
+The baseline was already 0.9544 — only 3.2% below the GPT-5.1 ceiling of 0.9865 — leaving very limited headroom. The fine-tuned model closes to 0.9672, **98.0% of GPT-5.1 on Spider**. The small absolute delta (+0.0128) is meaningful given the narrow remaining gap; this effectively represents saturation for a 3B model on Spider under this reward scheme.
+
+**BIRD — the primary value lever (+19.15%, reaching 72.0% of GPT-5.1)**  
+BIRD shows the most dramatic improvement: baseline 0.5906 → fine-tuned 0.7037, a **+0.1131 absolute / +19.15% relative** gain. This is the dominant contribution of the full training run. BIRD's harder multi-table joins, noisier schema semantics, and ambiguous natural language are precisely the patterns that benefit most from GRPO's execution-reward signal — the policy learns to generate queries that actually execute, rather than plausible-looking ones that fail at runtime.
+
+**Overall (+10.85%)**  
+The weighted average reward improves from 0.7183 to 0.7962. The large BIRD gain is the primary driver; the near-saturated Spider score contributes marginally. For a 3B parameter model, reaching **72% of GPT-5.1 on BIRD** and **98% on Spider** at a fraction of inference cost represents a strong cost-quality trade-off.
+
 **GPT-5.1 as upper-bound reference**  
-GPT-5.1 scores 0.9801 overall (0.9865 Spider / 0.9770 BIRD) on the same reward formula, providing a well-calibrated ceiling. The GRPO-trained 3B SLM recovers ~84% of GPT-5.1's overall reward with orders-of-magnitude lower inference cost, validating the RL fine-tuning approach for cost-sensitive deployments.
+GPT-5.1 scores 0.9801 overall (0.9865 Spider / 0.9770 BIRD) on the same reward formula, providing a well-calibrated ceiling. The GRPO-trained 3B SLM recovers **98% of GPT-5.1 on Spider** and **72% on BIRD** with orders-of-magnitude lower inference cost, validating the RL fine-tuning approach for cost-sensitive deployments.
 
 **Reward signal validation**  
-The aligned gains across both benchmarks validate the combined reward (`format + execution + schema fidelity`) as an effective supervision proxy for text-to-SQL RL fine-tuning. The execution component provides a hard grounding signal that resists superficial improvements.
+The large BIRD gain validates the combined reward (`format + execution + schema fidelity + sql_fence`) as an effective supervision proxy for text-to-SQL RL fine-tuning on harder, real-world benchmarks. The execution component provides a hard grounding signal that resists superficial improvements — a query either runs or it doesn't.
 
 ### Limitations
 
-- Training used a **sampled subset** of the full combined corpus (400 examples, schema-level split), not the complete Spider + BIRD training sets
-- Only **2 epochs** were run; the learning curve had not yet plateaued at checkpoint
 - The 3B model size limits its ability to handle the most complex BIRD queries requiring multi-step reasoning; the larger gap vs. GPT-5.1 on BIRD reflects this
 - `extract_sql` and SQLGlot show occasional parsing/token errors; a more robust SQL extraction approach may improve the reward signal
 
-> Results measured on held-out schemas not seen during training. Full evaluation logs available in MLflow.  
+> Results measured on held-out schemas not seen during training. Full evaluation logs available in /docs folder.  
+
 > **Scaling note:** Training for 5–10 epochs on the full Spider + BIRD corpus and upgrading to the 7B variant (`Qwen2.5-Coder-7B-Instruct`) is projected to push Spider beyond 0.93 and close the remaining gap with GPT-5.1 on BIRD.
 
 ---
@@ -101,24 +154,12 @@ The aligned gains across both benchmarks validate the combined reward (`format +
 
 - Azure subscription with quota for `Standard_NC24ads_A100_v4` (or smaller GPU)
 - Azure CLI + ML extension installed
-- Bicep CLI installed
+- AML Workspace with CPU Cluster, GPU cluster SKU - `Standard_NC24ads_A100_v4`
 
 Install the Azure ML CLI extension before running the scripts in `azure/create_env.ps1` or `azure/build_image.ps1`:
 
 ```bash
 az extension add --name ml
-```
-
-### Deploy infrastructure
-
-```bash
-# Clone the repo
-git clone https://github.com/sriksmachi/text2sql-grpo-azure-ml.git
-cd text2sql-grpo-azure-ml
-
-# Deploy Azure ML workspace + compute + endpoints
-az group create --name rg-text2sql-dev --location eastus
-az deployment group create --resource-group rg-text2sql-dev --template-file azure/bicep/main.bicep --parameters baseName=text2sql environment=dev ownerObjectId=$(az ad signed-in-user show --query id -o tsv)
 ```
 
 ### Run the pipeline
@@ -158,21 +199,11 @@ cd azure
 > run live query execution. Without it, `exec_reward` silently returns `0.0`
 > for every sample, making the dominant reward signal inactive.
 
-### Register the Azure ML environment
-
-```bash
-# First time only – builds the conda env on top of the CUDA base image
-az ml environment create \
-  --file azure/environments/environment.yml \
-  --resource-group rg-text2sql-dev \
-  --workspace-name aml-text2sql-dev
-```
-
 ### Run individual jobs
 
 ```powershell
-$RG = "sriks-aml-rg"
-$WS = "sriks-aml-ws"
+$RG = "your-aml-rg"
+$WS = "your-aml-ws"
 
 # 1. Data preparation (CPU cluster) — or use .\prep_data.ps1 to also register both assets
 .\run_jobs.ps1 -Mode job -Job data_prep -ResourceGroup $RG -Workspace $WS
@@ -190,7 +221,7 @@ $WS = "sriks-aml-ws"
 | Resource | SKU | Est. Monthly Cost |
 |---|---|---|
 | GPU Compute (training) | Standard_NC24ads_A100_v4 × 1 node, ~20 h | ~$120 |
-| GPU Compute (inference endpoint) | Standard_NC6s_v3 × 1 instance | ~$350 |
+| GPU Compute (inference endpoint) | Standard_NC24ads_A100_v4 × 1 instance | ~$350 |
 | Azure ML Workspace | Standard | ~$0 (workspace free) |
 | Storage Account | Standard LRS, ~50 GB | ~$1 |
 | Container Registry | Premium | ~$18 |
@@ -282,18 +313,6 @@ path). The `exec_reward` weight is `0.5`, so this effectively disables the
 dominant reward component. Always run `prep_data.ps1` before submitting a
 training job rather than re-using a stale `last_rawdata_id.txt` from a
 different cluster or workspace.
-
----
-
-## 🔑 Key Design Decisions
-
-| Decision | Rationale |
-|---|---|
-| **GRPO over PPO** | No separate value model → 2× memory savings on GPU |
-| **Schema-level splits** | Prevents data leakage; tests true generalisation |
-| **Multi-dialect exec reward** | Ensures SQL is executable, not just syntactically valid |
-| **Unsloth 4-bit QLoRA** | Enables A100 40 GB training without multi-node |
-| **Azure ML pipelines** | Reproducible, tracked, cost-monitored runs |
 
 ---
 

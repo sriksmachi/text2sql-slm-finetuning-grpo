@@ -97,14 +97,21 @@ def extract_sql(text: str) -> str | None:
     # 2) Normalize in-word apostrophes (O'Gallagher -> O''Gallagher, Women's -> Women''s)
     sql = re.sub(r"(?<=[A-Za-z])'(?=[A-Za-z])", "''", sql)
 
-    # 3) Normalize spaced apostrophes in names (O' Gallagher -> O'' Gallagher),
-    #    but do NOT touch valid quote closures before SQL keywords/operators.
-    sql = re.sub(
-    r"'([^'\n\r]*)''(?=\s*(?:AND|OR|NOT|IN|LIKE|IS|BETWEEN|FROM|WHERE|JOIN|ON|GROUP|ORDER|HAVING|LIMIT|UNION|$|;|,|\)))",
-    r"'\1'",
-    sql,
-    flags=re.IGNORECASE,
-)
+    # 3) Un-double apostrophes that step 2 incorrectly doubled when they appear
+    #    immediately before a SQL keyword or delimiter (e.g. 'Women''s AND …'
+    #    → 'Women's AND …' is wrong; skip carefully).
+    #    The lookahead alternation can trigger Python re's recursive engine on
+    #    long or complex SQL strings, so catch RecursionError and leave the SQL
+    #    as-is — the doubled quote is the safer form for SQLite anyway.
+    _APOSTROPHE_FIX_RE = re.compile(
+        r"'([^'\n\r]*)''(?=\s*(?:AND|OR|NOT|IN|LIKE|IS|BETWEEN|FROM|WHERE"
+        r"|JOIN|ON|GROUP|ORDER|HAVING|LIMIT|UNION|;|,|\)))",
+        re.IGNORECASE,
+    )
+    try:
+        sql = _APOSTROPHE_FIX_RE.sub(r"'\1'", sql)
+    except (sqlglot.errors.TokenError, RecursionError):
+        logger.warning("extract_sql: RecursionError in apostrophe-fix regex; skipping step 3")
     return sql
 
 
@@ -172,19 +179,10 @@ def format_reward(
             rewards.append(0.0)
             continue
         try:
-            parsed = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.RAISE)
+            parsed = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.WARN)
             score = 1.0 if parsed else 0.0
-        except sqlglot.errors.ParseError as exc:
-            logger.debug(
-                f"[format_reward] [{idx}] sql_preview={_preview_text(sql)!r}"
-            )
-            logger.warning(f"[format_reward] [{idx}] Parse error: {exc} → 0.0")
-            score = 0.0
-        except sqlglot.errors.TokenError as exc:
-            logger.debug(
-                f"[format_reward] [{idx}] sql_preview={_preview_text(sql)!r}"
-            )
-            logger.warning(f"[format_reward] [{idx}] Token error: {exc} → 0.0")
+        except (sqlglot.errors.TokenError, RecursionError):
+            logger.debug(f"[format_reward] [{idx}] sql_preview={_preview_text(sql)!r} tokenize/recursion_error")
             score = 0.0
         rewards.append(score)
     return rewards
@@ -339,7 +337,7 @@ def _extract_schema_items(sql: str) -> tuple[set[str], set[str]]:
     tables: set[str] = set()
     columns: set[str] = set()
     try:
-        for stmt in sqlglot.parse(sql):
+        for stmt in sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.WARN):
             if stmt is None:
                 continue
             for node in stmt.walk():
@@ -347,12 +345,8 @@ def _extract_schema_items(sql: str) -> tuple[set[str], set[str]]:
                     tables.add(node.name.lower())
                 if isinstance(node, sqlglot.exp.Column) and node.name:
                     columns.add(node.name.lower())
-    except sqlglot.errors.ParseError as exc:
-        logger.debug(f"[schema] sql_preview={_preview_text(sql)!r}")
-        logger.warning(f"[schema] Parse error while extracting items: {exc}")
-    except sqlglot.errors.TokenError as exc:
-        logger.debug(f"[schema] sql_preview={_preview_text(sql)!r}")
-        logger.warning(f"[schema] Token error while extracting items: {exc}")
+    except (sqlglot.errors.TokenError, RecursionError):
+        logger.debug(f"[schema] sql_preview={_preview_text(sql)!r} tokenize/recursion_error")
     return tables, columns
 
 

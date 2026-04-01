@@ -107,16 +107,24 @@ def extract_sql_from_text(text: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
-    "You are a SQL query generator. Your sole task is to convert a natural language question "
-    "into a single SQL query using the provided database schema.\n\n"
-    "STRICT RULES:\n"
-    "- Output ONLY a SQL query wrapped in a ```sql ... ``` code block.\n"
-    "- Do NOT write any explanation, description, prose, Python, or markdown outside the code block.\n"
-    "- Do NOT answer the question in plain text.\n"
-    "- Do NOT include multiple queries.\n"
-    "- Your entire response must be a single ```sql ... ``` block and nothing else."
-)
+    "You are an expert SQLite SQL generator. Your ONLY task is to convert a natural language "
+    "question into a **single valid SQLite query** using the provided database schema.\n\n"
 
+    "STRICT RULES:\n"
+    "- Output **ONLY** one SQL query wrapped in a ```sql ... ``` code block. Nothing else.\n"
+    "- Do NOT write any explanation, prose, comments, Python, or markdown outside the code block.\n"
+    "- Do NOT include multiple queries.\n"
+    "- Your entire response must be exactly one ```sql ... ``` block.\n\n"
+
+    "SQLITE-SPECIFIC RULES (must follow):\n"
+    "- Use **pure SQLite syntax only**. Never use YEAR(), MONTH(), CONTAINS, backticks (`), :: casting, or PARTITION BY.\n"
+    "- For year extraction, use strftime('%Y', column_name).\n"
+    "- Always use **table aliases** (t1, t2, etc.) and qualify every column: t1.column_name.\n"
+    "- Never invent tables or columns that are not in the provided schema.\n"
+    "- If you are unsure about a column or join, output a simple safe query instead of guessing.\n"
+    "- Use explicit JOIN ... ON syntax. Avoid implicit joins.\n"
+    "- Keep queries as simple and correct as possible.\n"
+)
 
 def build_prompt(
     question: str,

@@ -14,30 +14,28 @@ compute: azureml:gpu-cluster-2  # Standard_NC12s_v3 – vLLM inference requires 
 command: >-
   python src/evaluator.py
   --config configs/grpo_config.yaml
-  --lora-path ${{inputs.model_dir}}/grpo_saved_lora
-  --test-data ${{inputs.test_data}}
+  --lora-path ${{inputs.model_dir}}
+  --test-data ${{inputs.test_data}}/test.csv
   --eval-results ${{outputs.eval_results}}
-  --temperature ${{inputs.temperature}}
   --top-p ${{inputs.top_p}}
-  --max-tokens ${{inputs.max_tokens}}
   --log-level DEBUG
 
 inputs:
   model_dir:
     type: uri_folder
-    path: "" # set at runtime from grpo_train outputs
+    path: azureml:azureml_be59c12c-6698-4dc9-bbb4-3b4908019ef7_output_data_lora_dir:1
     mode: ro_mount
   test_data:
-    type: uri_file
-    path: "" # set at runtime from data_prep outputs
+    type: uri_folder
+    path: azureml:text2sql-grpo-splits:3
     mode: ro_mount
   rawdata_dir:
     type: uri_folder
-    path: "" # set at runtime from data_prep outputs
+    path: azureml:text2sql-grpo-rawdata:1
     mode: ro_mount
-  temperature: 0.7
   top_p: 1.0
-  max_tokens: 512
+  # temperature and max_tokens intentionally omitted – evaluator reads them
+  # from grpo_config.yaml so eval conditions match training exactly.
 
 outputs:
   eval_results:
