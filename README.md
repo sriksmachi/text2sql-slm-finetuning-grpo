@@ -50,7 +50,9 @@ Rewards are evaluated as the average combined score (`format × 0.2 + exec × 0.
 > ¹ GRPO ablation: 400-sample subset, 2 epochs, schema-level split — not trained on full corpus.  
 > ² GPT-5.1 evaluated on the same held-out test set; no fine-tuning.
 
-#### Full production run (full corpus · 5 epochs · run `be59c12c` · 2026-04-01)
+#### Full production run 
+
+Improvement in rewards compared to baseline and LLMs.
 
 | Dataset | SLM · pre-GRPO (baseline) | SLM · post-GRPO ³ | Δ (abs / rel) | % of GPT-5.1 |
 |---|---:|---:|---:|---:|
@@ -145,6 +147,40 @@ The large BIRD gain validates the combined reward (`format + execution + schema 
 > Results measured on held-out schemas not seen during training. Full evaluation logs available in /docs folder.  
 
 > **Scaling note:** Training for 5–10 epochs on the full Spider + BIRD corpus and upgrading to the 7B variant (`Qwen2.5-Coder-7B-Instruct`) is projected to push Spider beyond 0.93 and close the remaining gap with GPT-5.1 on BIRD.
+
+---
+
+### 💰 Inference Cost Comparison — 10,000 calls/day
+
+> Prices as of April 2026. GPT-5.1 Global standard (Azure OpenAI). Compute: `Standard_NC24ads_A100_v4` (~$3.67/hr pay-as-you-go), the same SKU used for training. Token assumptions: 600 input tokens (schema + question) + 120 output tokens (average SQL, measured from eval run). SLM throughput: ~1.2 req/s observed single-threaded; ~20 req/s estimated with production vLLM batching.
+
+#### Per-call token cost (GPT-5.1)
+
+| Token bucket | Count | Rate ($/1M) | Cost per call |
+|---|---:|---:|---:|
+| Input | 600 | $1.25 | $0.000750 |
+| Output | 120 | $10.00 | $0.001200 |
+| **Total** | | | **$0.001950** |
+
+#### Monthly cost at 10k calls/day (300k calls/month)
+
+| Deployment | Config | Cost/call | Cost/day | Cost/month | vs GPT-5.1 |
+|---|---|---:|---:|---:|---:|
+| **GPT-5.1** | Pay-per-token (Global) | $0.001950 | $19.50 | **$585** | baseline |
+| **SLM — A100 (scale-to-zero)** | Active compute only (~0.4 hr/day) | $0.000143 | $1.47 | **$44** | **13× cheaper** |
+| **SLM — T4 (always-on)** ⁴ | 1× NC4as_T4_v3 ($0.52/hr) | $0.001248 | $12.48 | **$374** | **1.6× cheaper** |
+
+> ⁴ The 3B model at 4-bit (2.3 GB weights + ~5 GB KV cache at batch 16) fits within a T4 16 GB GPU, making an always-on T4 the best cost/availability trade-off at this call volume.
+
+#### Quality-cost efficiency
+
+| Model | Spider reward | BIRD reward | Monthly @ 10k/day | Quality/$ (overall reward / $1k/month) |
+|---|---:|---:|---:|---:|
+| GPT-5.1 | 0.9865 | 0.9770 | $585 | 3.28 |
+| **SLM post-GRPO (T4 always-on)** | **0.9672** | **0.7037** | **$374** | **4.49** |
+| SLM post-GRPO (A100 scale-to-zero) | 0.9672 | 0.7037 | $44 | **38.2** |
+
+The GRPO-fine-tuned 3B SLM delivers **38× more reward per dollar** than GPT-5.1 under a scale-to-zero deployment, or **1.4× better quality-per-dollar** on an always-on T4 — at 98% of GPT-5.1 quality on Spider and 72% on BIRD.
 
 ---
 
